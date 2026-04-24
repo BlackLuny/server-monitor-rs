@@ -1,0 +1,39 @@
+# Caddyfile template consumed by `install-panel.sh`.
+# The literal `{{DOMAIN}}` placeholder below is replaced at install time.
+# Caddy 2 automatically provisions TLS via Let's Encrypt for any hostname here.
+
+{{DOMAIN}} {
+    encode zstd gzip
+
+    # gRPC subtree: anything under /grpc/* is forwarded as cleartext HTTP/2 (h2c)
+    # to the panel. Caddy terminates TLS; the panel speaks plain gRPC internally.
+    # Agents are configured with `https://{{DOMAIN}}/grpc` so everything they
+    # do is TLS-protected between browser/agent and this proxy.
+    @grpc path /grpc/*
+    reverse_proxy @grpc h2c://panel:9090 {
+        # gRPC streams can be arbitrarily long (SSH terminals, long-lived
+        # agent connections). Don't time them out.
+        flush_interval -1
+        transport http {
+            read_buffer 64KB
+            write_buffer 64KB
+        }
+    }
+
+    # Everything else → HTTP API + SvelteKit UI.
+    reverse_proxy panel:8080
+
+    # Security headers — opinionated defaults; adjust if they break your UI.
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        # HSTS is added automatically once TLS is provisioned.
+    }
+
+    # Route panel-emitted log lines into the container's stdout.
+    log {
+        output stdout
+        format console
+    }
+}

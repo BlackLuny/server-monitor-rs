@@ -1,0 +1,3 @@
+# `cargo xtask <command>` aliases to running the xtask binary.
+[alias]
+xtask = "run --quiet --package xtask --"

@@ -1,0 +1,41 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Environments / secrets
+.env
+.env.local
+*.pem
+*.key
+*.crt
+
+# Local config
+config.local.yaml
+/data
+
+# IDE / OS
+.idea/
+.vscode/
+!.vscode/extensions.json
+.fleet/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Frontend
+/frontend/node_modules
+/frontend/.svelte-kit
+/frontend/build
+/frontend/.vite
+/frontend/dist
+
+# Docker / compose generated
+/deploy/docker/.env
+/deploy/docker/Caddyfile
+/deploy/docker/docker-compose.override.yml
+
+# Embedded assets (populated at build time)
+/crates/panel/embed
+/.pnpm-store

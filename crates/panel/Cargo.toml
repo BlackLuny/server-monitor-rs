@@ -1,0 +1,63 @@
+[package]
+name = "monitor-panel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Control panel for server-monitor-rs (HTTP API + gRPC server + web UI)"
+default-run = "monitor-panel"
+
+[lints]
+workspace = true
+
+[lib]
+name = "monitor_panel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "monitor-panel"
+path = "src/main.rs"
+
+[dependencies]
+monitor-common = { workspace = true }
+monitor-proto = { workspace = true, features = ["server"] }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+
+tonic = { workspace = true }
+
+clap = { workspace = true }
+figment = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+sqlx = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+
+rust-embed = { version = "8", features = ["mime-guess", "include-exclude"] }
+mime_guess = "2"
+
+dashmap = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+# Proto client side is enabled for integration tests that exercise the gRPC server.
+monitor-proto = { workspace = true, features = ["server", "client"] }
+tokio = { workspace = true }
+tonic = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"

@@ -1,0 +1,167 @@
+/* ------------------------------------------------------------------
+   server-monitor design system.
+
+   Aesthetic: "infrastructure control room" — Bloomberg terminal × Linear
+   × Railway. Dense information. Hairline borders, no card shadows, no
+   glass morphism, no neon glow. Semantic colour only where status matters;
+   everything else stays monochromatic.
+
+   Typography: Geist Variable for UI, JetBrains Mono Variable for every
+   numeric value and timestamp (tabular figures by default).
+
+   All colours are OKLCH so lightness adjusts perceptually rather than
+   numerically — that keeps the family coherent across dark tiers.
+------------------------------------------------------------------ */
+
+@import '@fontsource-variable/geist/index.css';
+@import '@fontsource-variable/jetbrains-mono/index.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ---------- surface ---------- */
+    --bg-base: oklch(0.17 0.01 250); /* page background, near-black but cool */
+    --bg-elev-1: oklch(0.21 0.01 250); /* cards */
+    --bg-elev-2: oklch(0.24 0.01 250); /* hover / active surfaces */
+    --bg-recess: oklch(0.14 0.01 250); /* inputs / code blocks */
+
+    /* ---------- borders ---------- */
+    --border: oklch(0.28 0.01 250);
+    --border-strong: oklch(0.38 0.01 250);
+    --border-accent: oklch(0.75 0.14 145); /* the "left rail" accent */
+
+    /* ---------- text (tinted toward bg hue) ---------- */
+    --fg-primary: oklch(0.95 0.005 250);
+    --fg-secondary: oklch(0.72 0.01 250);
+    --fg-tertiary: oklch(0.55 0.01 250);
+    --fg-quaternary: oklch(0.42 0.01 250);
+
+    /* ---------- semantic status ---------- */
+    /* Muted, not glowing — the difference between "operator's tool" and
+       "gaming overlay" is keeping chroma below ~0.16. */
+    --status-online: oklch(0.75 0.14 145);
+    --status-warn: oklch(0.76 0.12 70);
+    --status-error: oklch(0.66 0.19 25);
+    --status-idle: oklch(0.55 0.01 250);
+
+    /* ---------- data viz (5-colour categorical) ---------- */
+    --data-1: oklch(0.75 0.14 145); /* CPU — green */
+    --data-2: oklch(0.72 0.13 220); /* memory — blue */
+    --data-3: oklch(0.76 0.12 70); /* net in — amber */
+    --data-4: oklch(0.68 0.13 320); /* net out — magenta */
+    --data-5: oklch(0.82 0.05 200); /* load / neutral — teal */
+
+    /* ---------- motion ---------- */
+    --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+    --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+    --flash-duration: 360ms;
+  }
+
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body {
+    font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-feature-settings:
+      'ss01' on,
+      'ss03' on,
+      'cv01' on; /* Geist stylistic sets: flatter 'a', straighter digits */
+    background: var(--bg-base);
+    color: var(--fg-primary);
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  code,
+  kbd,
+  .font-mono {
+    font-family:
+      'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, Menlo, Monaco, Consolas, monospace;
+    font-feature-settings:
+      'ss19' on,
+      'zero' on; /* bold-stroke zero, explicit lookalike disambiguation */
+  }
+
+  /* Remove the default focus ring; primitives re-add one with a hairline
+     inset that matches their visual language. */
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 1px solid var(--border-accent);
+    outline-offset: 2px;
+  }
+
+  /* ---------- scrollbar ---------- */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklch, var(--border) 60%, transparent);
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--border-strong);
+  }
+
+  /* ---------- selection ---------- */
+  ::selection {
+    background: color-mix(in oklch, var(--border-accent) 35%, transparent);
+    color: var(--fg-primary);
+  }
+}
+
+@layer components {
+  /* The cell-level "flash" applied when a live value changes. Drop the
+     `.flash` class on the element; remove it after the transition ends. */
+  .flash {
+    animation: cell-flash var(--flash-duration) var(--ease-out-quart);
+  }
+  @keyframes cell-flash {
+    0% {
+      color: var(--status-online);
+    }
+    100% {
+      color: inherit;
+    }
+  }
+
+  /* Subtle pulse used by the status dot on an "online" agent.
+     Chroma is intentionally low — no glow halo. */
+  .dot-pulse::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 9999px;
+    border: 1px solid var(--status-online);
+    opacity: 0;
+    animation: dot-ripple 2.4s var(--ease-out-quart) infinite;
+  }
+  @keyframes dot-ripple {
+    0% {
+      transform: scale(0.85);
+      opacity: 0.55;
+    }
+    100% {
+      transform: scale(1.8);
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .flash,
+    .dot-pulse::after {
+      animation: none !important;
+    }
+  }
+}

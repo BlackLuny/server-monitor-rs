@@ -1,0 +1,10 @@
+/target
+/frontend/node_modules
+/frontend/.svelte-kit
+/frontend/.vite
+/deploy/docker/.env
+.git
+.gitignore
+.github
+/data
+*.log

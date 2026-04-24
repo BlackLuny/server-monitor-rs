@@ -1,0 +1,29 @@
+# monitor-panel configuration — copy to ./config.yaml and edit.
+#
+# Environment variables with prefix MONITOR_ override any value here.
+# Nested fields use `__` as separator, e.g. `MONITOR_DATABASE__URL=...`.
+
+http:
+  listen: "0.0.0.0:8080"
+
+grpc:
+  listen: "0.0.0.0:9090"
+
+database:
+  # Postgres connection string. Use a strong password in production.
+  url: "postgres://monitor:monitor@localhost:5432/monitor"
+  max_connections: 16
+
+jwt:
+  # Must be at least 32 bytes. Generate with `openssl rand -hex 32`.
+  secret: "CHANGE_ME_0123456789abcdef0123456789abcdef"
+
+log:
+  filter: "info,sqlx=warn"
+  format: "text"   # or "json"
+
+github:
+  # owner/repo for update checks (public repo, anonymous by default).
+  repo: "lunyxiaoluny/server-monitor-rs"
+  # Optional PAT for higher API rate limit.
+  token: ""

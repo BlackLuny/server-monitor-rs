@@ -1,0 +1,301 @@
+syntax = "proto3";
+
+package monitor.v1;
+
+// ============================================================================
+// AgentService — the single RPC surface between Agent and Panel.
+//
+//   * Register: one-shot handshake that exchanges a short-lived join_token for
+//     a long-lived server_token, plus agent_id.
+//   * Stream: bidirectional long-lived channel that carries everything else
+//     (metrics, probe results, terminal IO, update coordination, commands).
+//     The client authenticates by attaching the server_token in gRPC metadata
+//     header "x-server-token".
+// ============================================================================
+
+service AgentService {
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+    rpc Stream(stream AgentToPanel) returns (stream PanelToAgent);
+}
+
+// ----------------------------------------------------------------------------
+// Register
+// ----------------------------------------------------------------------------
+
+message RegisterRequest {
+    // Single-use token the user pastes into install-agent.sh.
+    string join_token = 1;
+    // Freeform hostname reported by the OS.
+    string hostname = 2;
+    // Detected hardware snapshot. Optional on re-register (empty = unchanged).
+    HardwareInfo hardware = 3;
+    // Agent binary version, e.g. "0.1.0".
+    string agent_version = 4;
+    // Host OS identifier, e.g. "linux", "darwin", "windows".
+    string os = 5;
+    // Host CPU architecture, e.g. "x86_64", "aarch64".
+    string arch = 6;
+}
+
+message RegisterResponse {
+    // Server-side identifier for this agent (UUID).
+    string agent_id = 1;
+    // Long-lived token the agent stores and attaches to Stream metadata.
+    string server_token = 2;
+}
+
+// ----------------------------------------------------------------------------
+// Stream envelopes
+// ----------------------------------------------------------------------------
+
+message AgentToPanel {
+    // Monotonically increasing per-connection sequence number. Used for idempotency
+    // when the panel persists streamed data.
+    uint64 seq = 1;
+
+    oneof payload {
+        Heartbeat heartbeat = 10;
+        MetricSnapshot metrics = 11;
+        ProbeResult probe_result = 12;
+        TerminalOutput terminal_output = 13;
+        TerminalClosed terminal_closed = 14;
+        UpdateStatus update_status = 15;
+        // Batched metric samples — preferred over the single-shot `metrics`
+        // field when the agent has several seconds of 1 Hz samples to flush.
+        MetricBatch metrics_batch = 16;
+    }
+}
+
+message MetricBatch {
+    repeated MetricSnapshot snapshots = 1;
+}
+
+message PanelToAgent {
+    uint64 seq = 1;
+
+    oneof payload {
+        // Server acknowledges a specific agent seq (for flow control / retries).
+        Ack ack = 10;
+        // Full replacement of the probe set this agent must execute.
+        ProbeConfig probe_config = 11;
+        // Open a new terminal session.
+        TerminalOpen terminal_open = 12;
+        // Send user input bytes to an open session.
+        TerminalInput terminal_input = 13;
+        // Resize an open session.
+        TerminalResize terminal_resize = 14;
+        // Close an open session.
+        TerminalClose terminal_close = 15;
+        // Trigger agent self-update.
+        UpdateAgent update = 16;
+        // Abort a pending/in-flight update rollout.
+        UpdateAbort update_abort = 17;
+    }
+}
+
+message Ack {
+    uint64 ack_seq = 1;
+}
+
+// ----------------------------------------------------------------------------
+// Heartbeat & metrics
+// ----------------------------------------------------------------------------
+
+message Heartbeat {
+    // Agent-local unix timestamp in milliseconds (best-effort wallclock).
+    int64 ts_ms = 1;
+    // Agent process uptime in seconds.
+    uint64 uptime_s = 2;
+}
+
+message HardwareInfo {
+    string cpu_model = 1;
+    uint32 cpu_cores = 2;
+    uint64 mem_bytes = 3;
+    uint64 swap_bytes = 4;
+    uint64 disk_bytes = 5;
+    string os = 6;
+    string os_version = 7;
+    string kernel = 8;
+    string arch = 9;
+    string virtualization = 10;
+    string boot_id = 11;
+}
+
+message MetricSnapshot {
+    // Wallclock ms when the sample was taken on the agent.
+    int64 ts_ms = 1;
+
+    // CPU
+    double cpu_pct = 10;
+    repeated double cpu_pct_per_core = 11;
+
+    // Memory
+    uint64 mem_used = 20;
+    uint64 mem_total = 21;
+    uint64 swap_used = 22;
+    uint64 swap_total = 23;
+
+    // Load avg (0 on Windows)
+    double load_1 = 30;
+    double load_5 = 31;
+    double load_15 = 32;
+
+    // Disk (aggregate across mountpoints; per-mount detail in `disks`)
+    uint64 disk_used = 40;
+    uint64 disk_total = 41;
+    repeated DiskUsage disks = 42;
+
+    // Network (aggregate across interfaces; per-iface detail in `nets`)
+    uint64 net_in_bps = 50;
+    uint64 net_out_bps = 51;
+    uint64 net_in_total = 52;
+    uint64 net_out_total = 53;
+    repeated NetUsage nets = 54;
+
+    // Process / connection counts
+    uint32 process_count = 60;
+    uint32 tcp_conn = 61;
+    uint32 udp_conn = 62;
+
+    // Optional sensors
+    double temperature_c = 70; // negative = unavailable
+    double gpu_pct = 71;       // -1 = unavailable
+}
+
+message DiskUsage {
+    string mount = 1;
+    string fstype = 2;
+    uint64 used = 3;
+    uint64 total = 4;
+    uint64 read_bps = 5;
+    uint64 write_bps = 6;
+}
+
+message NetUsage {
+    string name = 1;
+    uint64 rx_bps = 2;
+    uint64 tx_bps = 3;
+    uint64 rx_total = 4;
+    uint64 tx_total = 5;
+}
+
+// ----------------------------------------------------------------------------
+// Network probes
+// ----------------------------------------------------------------------------
+
+enum ProbeType {
+    PROBE_TYPE_UNSPECIFIED = 0;
+    PROBE_TYPE_ICMP = 1;
+    PROBE_TYPE_TCP = 2;
+    PROBE_TYPE_HTTP = 3;
+}
+
+message ProbeConfig {
+    repeated Probe probes = 1;
+}
+
+message Probe {
+    string id = 1;
+    string name = 2;
+    ProbeType type = 3;
+    string target = 4;            // IP/host for ICMP/TCP, URL for HTTP
+    uint32 port = 5;              // unused for ICMP/HTTP
+    uint32 interval_s = 6;
+    uint32 timeout_ms = 7;
+
+    // HTTP-only
+    string http_method = 20;      // default: GET
+    uint32 http_expect_code = 21; // 0 = any 2xx
+    string http_expect_body = 22; // substring, empty = skip
+}
+
+message ProbeResult {
+    string probe_id = 1;
+    int64 ts_ms = 2;
+    bool ok = 3;
+    uint32 latency_ms = 4;        // 0 on failure
+    uint32 status_code = 5;       // HTTP only
+    string error = 6;             // human message when !ok
+}
+
+// ----------------------------------------------------------------------------
+// Terminal (SSH via agent)
+// ----------------------------------------------------------------------------
+
+message TerminalOpen {
+    string session_id = 1;
+    uint32 cols = 2;
+    uint32 rows = 3;
+    string shell = 4;             // empty = agent default ($SHELL / bash / cmd)
+}
+
+message TerminalInput {
+    string session_id = 1;
+    bytes data = 2;
+}
+
+message TerminalResize {
+    string session_id = 1;
+    uint32 cols = 2;
+    uint32 rows = 3;
+}
+
+message TerminalClose {
+    string session_id = 1;
+}
+
+message TerminalOutput {
+    string session_id = 1;
+    bytes data = 2;
+}
+
+message TerminalClosed {
+    string session_id = 1;
+    int32 exit_code = 2;         // negative when killed by signal
+    string error = 3;
+}
+
+// ----------------------------------------------------------------------------
+// Self-update coordination (agent-side state reported to Panel; the actual
+// download uses GitHub Releases with the payload the Panel sends here).
+// ----------------------------------------------------------------------------
+
+message UpdateAgent {
+    // Correlates events back to a Panel-side rollout row.
+    string rollout_id = 1;
+    // Target version tag, e.g. "v0.2.0".
+    string version = 2;
+    // Full URL to the platform-specific binary archive.
+    string asset_url = 3;
+    // Expected SHA-256 (hex) of the archive.
+    string sha256 = 4;
+    // Optional GitHub Artifact Attestation bundle URL (Sigstore).
+    string attestation_url = 5;
+    // Grace period in seconds after swap for the new agent to confirm health.
+    uint32 grace_s = 6;
+}
+
+message UpdateAbort {
+    string rollout_id = 1;
+    string reason = 2;
+}
+
+enum UpdateState {
+    UPDATE_STATE_UNSPECIFIED = 0;
+    UPDATE_STATE_DOWNLOADING = 1;
+    UPDATE_STATE_SELF_CHECK = 2;
+    UPDATE_STATE_STAGED = 3;
+    UPDATE_STATE_SWITCHING = 4;
+    UPDATE_STATE_PROBING = 5;
+    UPDATE_STATE_CONFIRMED = 6;
+    UPDATE_STATE_ROLLED_BACK = 7;
+    UPDATE_STATE_FAILED = 8;
+}
+
+message UpdateStatus {
+    string rollout_id = 1;
+    string version = 2;
+    UpdateState state = 3;
+    string detail = 4;
+}

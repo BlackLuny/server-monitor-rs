@@ -1,0 +1,42 @@
+[package]
+name = "monitor-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lightweight agent that dials back to the monitor panel"
+default-run = "monitor-agent"
+
+[lints]
+workspace = true
+
+[lib]
+name = "monitor_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "monitor-agent"
+path = "src/main.rs"
+
+[dependencies]
+monitor-common = { workspace = true }
+monitor-proto = { workspace = true, features = ["client"] }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+clap = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+
+sysinfo = { workspace = true }
+hostname = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }

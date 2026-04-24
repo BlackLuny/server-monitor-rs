@@ -1,0 +1,74 @@
+# docker-compose for a single-host server-monitor-rs deployment.
+#
+# Usage:
+#   cp .env.example .env          # fill in secrets
+#   docker compose up -d          # postgres + panel only
+#   docker compose --profile caddy up -d   # also run Caddy for TLS/proxy
+#
+# The installer script (deploy/install-panel.sh) generates a matching `.env`
+# and `Caddyfile` automatically — running it by hand is only needed during
+# development.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-monitor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-monitor}
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-monitor} -d ${POSTGRES_DB:-monitor}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  panel:
+    image: ${PANEL_IMAGE:-ghcr.io/lunyxiaoluny/server-monitor-panel:latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MONITOR_DATABASE__URL: postgres://${POSTGRES_USER:-monitor}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-monitor}
+      MONITOR_JWT__SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (>=32 bytes)}
+      MONITOR_LOG__FILTER: ${LOG_FILTER:-info}
+      MONITOR_LOG__FORMAT: ${LOG_FORMAT:-text}
+      MONITOR_GITHUB__REPO: ${GITHUB_REPO:-lunyxiaoluny/server-monitor-rs}
+      MONITOR_GITHUB__TOKEN: ${GITHUB_TOKEN:-}
+    ports:
+      # HTTP API + UI — keep on loopback when Caddy fronts the deployment; flip
+      # to "0.0.0.0:8080:8080" if you terminate TLS elsewhere or expose it directly.
+      - "${PANEL_HTTP_BIND:-127.0.0.1}:8080:8080"
+      # gRPC — agents dial this directly (either raw or via Caddy /grpc/*).
+      - "${PANEL_GRPC_BIND:-0.0.0.0}:9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  caddy:
+    profiles: ["caddy"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - panel
+    environment:
+      # Caddyfile placeholder — the installer fills this when generating the file.
+      DOMAIN: ${DOMAIN:-panel.example.com}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  dbdata:
+  caddy_data:
+  caddy_config:
