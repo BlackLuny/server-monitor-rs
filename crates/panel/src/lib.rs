@@ -11,6 +11,7 @@ pub mod grpc;
 pub mod http_server;
 pub mod live;
 pub mod metrics;
+pub mod probes;
 pub mod settings;
 pub mod shutdown;
 pub mod state;

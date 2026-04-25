@@ -56,6 +56,7 @@ message AgentToPanel {
     oneof payload {
         Heartbeat heartbeat = 10;
         MetricSnapshot metrics = 11;
+        // Single-shot probe result. Preferred batch form lives in `probe_batch`.
         ProbeResult probe_result = 12;
         TerminalOutput terminal_output = 13;
         TerminalClosed terminal_closed = 14;
@@ -63,11 +64,17 @@ message AgentToPanel {
         // Batched metric samples — preferred over the single-shot `metrics`
         // field when the agent has several seconds of 1 Hz samples to flush.
         MetricBatch metrics_batch = 16;
+        // Several probe results bundled into one frame.
+        ProbeBatch probe_batch = 17;
     }
 }
 
 message MetricBatch {
     repeated MetricSnapshot snapshots = 1;
+}
+
+message ProbeBatch {
+    repeated ProbeResult results = 1;
 }
 
 message PanelToAgent {
@@ -76,8 +83,10 @@ message PanelToAgent {
     oneof payload {
         // Server acknowledges a specific agent seq (for flow control / retries).
         Ack ack = 10;
-        // Full replacement of the probe set this agent must execute.
-        ProbeConfig probe_config = 11;
+        // Full replacement of the probe set this agent must execute. Sent on
+        // initial agent connect or when the panel cannot reconstruct the
+        // delta safely (e.g. after a panel restart).
+        ProbeAssignmentSync probe_assignment_sync = 11;
         // Open a new terminal session.
         TerminalOpen terminal_open = 12;
         // Send user input bytes to an open session.
@@ -90,6 +99,9 @@ message PanelToAgent {
         UpdateAgent update = 16;
         // Abort a pending/in-flight update rollout.
         UpdateAbort update_abort = 17;
+        // Incremental update to the probe assignment. Idempotent when the
+        // agent already saw the same probe id.
+        ProbeAssignmentDelta probe_assignment_delta = 18;
     }
 }
 
@@ -191,11 +203,25 @@ enum ProbeType {
     PROBE_TYPE_HTTP = 3;
 }
 
-message ProbeConfig {
+// Initial-state push from panel to agent: replace the agent's local probe
+// map with exactly this set. Sent at stream start, after a panel restart,
+// or when the panel detects state divergence.
+message ProbeAssignmentSync {
     repeated Probe probes = 1;
 }
 
+// Delta against whatever probe set the agent currently holds. The agent
+// applies removals first, then adds/updates; semantics are idempotent so
+// the agent can replay a delta safely if the channel hiccups.
+message ProbeAssignmentDelta {
+    repeated Probe added = 1;
+    repeated Probe updated = 2;
+    repeated string removed_probe_ids = 3;
+}
+
 message Probe {
+    // Stable string id — the panel uses BIGSERIAL but we serialize as string
+    // for forward-compat (future: UUID, sharded ids, etc).
     string id = 1;
     string name = 2;
     ProbeType type = 3;
@@ -211,11 +237,12 @@ message Probe {
 }
 
 message ProbeResult {
+    // Stable id matching `Probe.id`.
     string probe_id = 1;
     int64 ts_ms = 2;
     bool ok = 3;
-    uint32 latency_ms = 4;        // 0 on failure
-    uint32 status_code = 5;       // HTTP only
+    uint32 latency_us = 4;        // microseconds — 0 on failure
+    uint32 status_code = 5;       // HTTP only; 0 otherwise
     string error = 6;             // human message when !ok
 }
 

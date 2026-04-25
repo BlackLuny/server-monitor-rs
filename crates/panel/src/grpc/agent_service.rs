@@ -146,6 +146,10 @@ impl AgentService for AgentServiceImpl {
         let (session, rx) = self.state.hub.register(agent_id, server_row_id);
         let inbound = request.into_inner();
 
+        // Wake the probe scheduler so it pushes this agent's initial probe
+        // assignment as soon as the downstream channel is live.
+        self.state.assignment_bus.publish();
+
         // Spawn the inbound loop — it owns the session (so it controls when to
         // drop from the hub). `rx` is returned to tonic to drive downstream.
         tokio::spawn(run_inbound_loop(
@@ -237,11 +241,29 @@ async fn handle_payload(
         AgentPayload::MetricsBatch(batch) => {
             ingest_and_broadcast(state, session, &batch.snapshots).await;
         }
-        // M4 will persist probe results; M5 the terminal IO; M7 the update status.
-        AgentPayload::ProbeResult(_)
-        | AgentPayload::TerminalOutput(_)
+        AgentPayload::ProbeResult(r) => {
+            ingest_probe_results(state, session, std::slice::from_ref(&r)).await;
+        }
+        AgentPayload::ProbeBatch(b) => {
+            ingest_probe_results(state, session, &b.results).await;
+        }
+        // M5 will handle terminal IO; M7 the update status.
+        AgentPayload::TerminalOutput(_)
         | AgentPayload::TerminalClosed(_)
         | AgentPayload::UpdateStatus(_) => {}
+    }
+}
+
+async fn ingest_probe_results(
+    state: &AppState,
+    session: &crate::grpc::AgentSession,
+    results: &[monitor_proto::v1::ProbeResult],
+) {
+    if results.is_empty() {
+        return;
+    }
+    if let Err(err) = crate::probes::ingest_batch(&state.pool, session.agent_id, results).await {
+        tracing::error!(%err, "probe ingest failed");
     }
 }
 

@@ -99,4 +99,11 @@ impl SessionHub {
     pub fn get(&self, agent_id: &Uuid) -> Option<AgentSession> {
         self.sessions.get(agent_id).map(|s| s.clone())
     }
+
+    /// Snapshot of the currently-connected agent IDs. Used by the probe
+    /// scheduler to compute per-agent assignment deltas.
+    #[must_use]
+    pub fn agent_ids(&self) -> Vec<Uuid> {
+        self.sessions.iter().map(|e| *e.key()).collect()
+    }
 }

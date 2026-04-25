@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use monitor_proto::{
     v1::{
         agent_service_client::AgentServiceClient, agent_to_panel::Payload as UpPayload,
-        AgentToPanel, Heartbeat, MetricBatch, MetricSnapshot,
+        panel_to_agent::Payload as DownPayload, AgentToPanel, Heartbeat, MetricBatch,
+        MetricSnapshot, ProbeBatch, ProbeResult,
     },
     SERVER_TOKEN_METADATA,
 };
@@ -14,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::transport::Channel;
 
-use crate::{collector::Collector, config::AgentConfig};
+use crate::{collector::Collector, config::AgentConfig, probes::Scheduler};
 
 /// Maximum backoff between reconnect attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -24,6 +25,10 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 /// Hard cap on the in-flight buffer so a panel outage can't OOM us.
 const BUFFER_CAP: usize = 60;
+/// Per-flush limit on probe results forwarded as one ProbeBatch. Tuning this
+/// is mostly about latency: smaller batches → quicker visibility on the
+/// panel, larger batches → fewer round trips.
+const PROBE_FLUSH_MAX: usize = 200;
 
 /// Run the Stream loop until cancellation. Each iteration opens a fresh Stream,
 /// runs it to completion (either clean shutdown or error), then backs off and
@@ -115,6 +120,11 @@ async fn run_once(
     let mut inbound = response.into_inner();
     tracing::info!("stream connected to panel");
 
+    // Fresh scheduler + result rx for this connection. We don't keep state
+    // across reconnects: the panel always re-sends a Sync after we
+    // reconnect, and any in-flight results are best-effort.
+    let (mut probe_sched, mut probe_rx) = Scheduler::new(512);
+
     let mut heartbeat_ticker =
         tokio::time::interval(Duration::from_secs(heartbeat_interval_s.max(1)));
     heartbeat_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -139,13 +149,14 @@ async fn run_once(
             msg = inbound.next() => {
                 match msg {
                     Some(Ok(panel_msg)) => {
-                        tracing::debug!(?panel_msg, "panel → agent");
+                        handle_panel_msg(panel_msg, &mut probe_sched);
                     }
                     Some(Err(status)) => return Err(status),
                     None => {
                         // Best-effort final flush of any buffered samples so
                         // we don't lose the last ~5s when the panel goes away.
                         let _ = flush_metrics(&up_tx, buffer, &mut seq).await;
+                        let _ = flush_probes(&up_tx, &mut probe_rx, &mut seq).await;
                         return Ok(());
                     }
                 }
@@ -168,17 +179,74 @@ async fn run_once(
 
             _ = flush_ticker.tick() => {
                 flush_metrics(&up_tx, buffer, &mut seq).await?;
+                flush_probes(&up_tx, &mut probe_rx, &mut seq).await?;
             }
 
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     tracing::info!("shutdown requested, flushing and closing stream");
                     let _ = flush_metrics(&up_tx, buffer, &mut seq).await;
+                    let _ = flush_probes(&up_tx, &mut probe_rx, &mut seq).await;
                     return Ok(());
                 }
             }
         }
     }
+}
+
+fn handle_panel_msg(msg: monitor_proto::v1::PanelToAgent, sched: &mut Scheduler) {
+    let Some(payload) = msg.payload else { return };
+    match payload {
+        DownPayload::ProbeAssignmentSync(s) => {
+            tracing::info!(count = s.probes.len(), "probe assignment sync");
+            sched.replace_all(s.probes);
+        }
+        DownPayload::ProbeAssignmentDelta(d) => {
+            tracing::info!(
+                added = d.added.len(),
+                updated = d.updated.len(),
+                removed = d.removed_probe_ids.len(),
+                "probe assignment delta"
+            );
+            sched.apply_delta(d.added, d.updated, d.removed_probe_ids);
+        }
+        // Acks, terminal IO, updates: handled by other modules in later milestones.
+        DownPayload::Ack(_)
+        | DownPayload::TerminalOpen(_)
+        | DownPayload::TerminalInput(_)
+        | DownPayload::TerminalResize(_)
+        | DownPayload::TerminalClose(_)
+        | DownPayload::Update(_)
+        | DownPayload::UpdateAbort(_) => {
+            tracing::debug!("ignoring panel→agent payload not yet handled");
+        }
+    }
+}
+
+async fn flush_probes(
+    up_tx: &mpsc::Sender<AgentToPanel>,
+    rx: &mut mpsc::Receiver<ProbeResult>,
+    seq: &mut u64,
+) -> Result<(), tonic::Status> {
+    let mut results = Vec::new();
+    while results.len() < PROBE_FLUSH_MAX {
+        match rx.try_recv() {
+            Ok(r) => results.push(r),
+            Err(_) => break,
+        }
+    }
+    if results.is_empty() {
+        return Ok(());
+    }
+    let msg = AgentToPanel {
+        seq: *seq,
+        payload: Some(UpPayload::ProbeBatch(ProbeBatch { results })),
+    };
+    *seq += 1;
+    up_tx
+        .send(msg)
+        .await
+        .map_err(|_| tonic::Status::aborted("upstream channel closed"))
 }
 
 async fn flush_metrics(

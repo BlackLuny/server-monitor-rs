@@ -4,9 +4,11 @@
 //! same `(axum::response::Response)` contract; the router here just binds
 //! verbs to paths.
 
+mod agents;
 mod auth;
 mod groups;
 pub mod metrics;
+mod probes;
 mod servers;
 mod settings;
 mod setup;
@@ -65,6 +67,23 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/groups/:id",
             patch(groups::update).delete(groups::delete_one),
+        )
+        // ---- agents (lightweight list for UI selectors) ----
+        .route("/api/agents", get(agents::list))
+        // ---- probes ----
+        .route("/api/probes", get(probes::list).post(probes::create))
+        .route(
+            "/api/probes/:id",
+            patch(probes::update).delete(probes::delete_one),
+        )
+        .route("/api/probes/:id/results", get(probes::results))
+        .route(
+            "/api/probes/:id/agents",
+            get(probes::list_agents_for_probe),
+        )
+        .route(
+            "/api/probes/:id/agents/:agent_id",
+            put(probes::set_override),
         )
         // ---- users (admin only) ----
         .route("/api/users", get(users::list).post(users::create))

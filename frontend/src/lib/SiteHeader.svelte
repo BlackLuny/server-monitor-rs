@@ -11,6 +11,7 @@
   type NavItem = { href: string; label: string; visibility: 'public' | 'auth' | 'admin' };
   const items: NavItem[] = [
     { href: '/', label: 'Servers', visibility: 'public' },
+    { href: '/probes', label: 'Probes', visibility: 'auth' },
     { href: '/settings/general', label: 'General', visibility: 'admin' },
     { href: '/settings/groups', label: 'Groups', visibility: 'admin' },
     { href: '/settings/users', label: 'Users', visibility: 'admin' },

@@ -53,6 +53,16 @@ async fn main() -> anyhow::Result<()> {
     // Periodic time-series aggregation + retention pruning.
     metrics::rollup::spawn(app_state.pool.clone(), shutdown_rx.clone());
 
+    // Probe scheduler keeps every connected agent's probe set in sync with
+    // the DB; the rollup task aggregates raw probe samples like metrics.
+    monitor_panel::probes::Scheduler::new(
+        app_state.pool.clone(),
+        app_state.hub.clone(),
+        app_state.assignment_bus.clone(),
+    )
+    .spawn(shutdown_rx.clone());
+    monitor_panel::probes::rollup::spawn(app_state.pool.clone(), shutdown_rx.clone());
+
     let http = tokio::spawn(http_server::run(
         cfg.http.listen,
         app_state.clone(),

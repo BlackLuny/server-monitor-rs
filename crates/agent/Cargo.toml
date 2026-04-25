@@ -37,6 +37,12 @@ serde_yaml = { workspace = true }
 sysinfo = { workspace = true }
 hostname = { workspace = true }
 
+surge-ping = { workspace = true }
+reqwest = { workspace = true }
+
+rand = { workspace = true }
+regex = { workspace = true }
+
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }

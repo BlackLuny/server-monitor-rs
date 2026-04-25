@@ -91,6 +91,10 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # System info (Agent)
 sysinfo = "0.32"
 
+# Network probes (Agent-side)
+surge-ping = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+
 # Utility
 uuid = { version = "1", features = ["v4", "serde"] }
 time = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }

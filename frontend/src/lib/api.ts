@@ -327,6 +327,105 @@ export function deleteServer(id: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Probes
+// ---------------------------------------------------------------------------
+
+export type ProbeKind = 'icmp' | 'tcp' | 'http';
+
+export interface ProbeRow {
+  id: number;
+  name: string;
+  kind: ProbeKind;
+  target: string;
+  port: number | null;
+  interval_s: number;
+  timeout_ms: number;
+  http_method: string | null;
+  http_expect_code: number | null;
+  http_expect_body: string | null;
+  default_enabled: boolean;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProbeAgentRow {
+  agent_id: string;
+  display_name: string;
+  default_enabled: boolean;
+  override_enabled: boolean | null;
+  effective_enabled: boolean;
+}
+
+export interface ProbeResultPoint {
+  ts: string;
+  agent_id: string;
+  ok: boolean;
+  latency_us: number;
+  latency_us_p50: number | null;
+  latency_us_p95: number | null;
+  success_rate: number | null;
+  status_code: number | null;
+  error: string | null;
+}
+
+export interface ProbeResultsSeries {
+  probe_id: number;
+  range: string;
+  granularity: 'raw' | 'm1' | 'm5' | 'h1';
+  points: ProbeResultPoint[];
+}
+
+export function listProbes(): Promise<ProbeRow[]> {
+  return getJson<ProbeRow[]>('/api/probes');
+}
+
+export function createProbe(body: Partial<ProbeRow>): Promise<ProbeRow> {
+  return postJson<ProbeRow>('/api/probes', body);
+}
+
+export function updateProbe(id: number, body: Partial<ProbeRow>): Promise<ProbeRow> {
+  return patchJson<ProbeRow>(`/api/probes/${id}`, body);
+}
+
+export function deleteProbe(id: number): Promise<void> {
+  return deleteNoBody(`/api/probes/${id}`);
+}
+
+export function listProbeAgents(id: number): Promise<ProbeAgentRow[]> {
+  return getJson<ProbeAgentRow[]>(`/api/probes/${id}/agents`);
+}
+
+export function setProbeOverride(
+  probeId: number,
+  agentId: string,
+  enabled: boolean | null
+): Promise<void> {
+  return putNoContent(`/api/probes/${probeId}/agents/${agentId}`, { enabled });
+}
+
+export function fetchProbeResults(
+  id: number,
+  range: string,
+  agentId?: string
+): Promise<ProbeResultsSeries> {
+  const params = new URLSearchParams({ range });
+  if (agentId) params.set('agent_id', agentId);
+  return getJson<ProbeResultsSeries>(`/api/probes/${id}/results?${params}`);
+}
+
+export interface AgentRow {
+  agent_id: string;
+  display_name: string;
+  online: boolean;
+  group_name: string | null;
+}
+
+export function listAgents(): Promise<AgentRow[]> {
+  return getJson<AgentRow[]>('/api/agents');
+}
+
+// ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 

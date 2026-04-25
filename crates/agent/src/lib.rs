@@ -6,6 +6,7 @@
 pub mod collector;
 pub mod config;
 pub mod hardware;
+pub mod probes;
 pub mod register;
 pub mod stream;
 pub mod transport;
