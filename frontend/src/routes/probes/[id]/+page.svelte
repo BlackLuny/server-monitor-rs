@@ -139,12 +139,80 @@
     'var(--data-5)'
   ];
 
-  // Build chart data: one series per agent_id, latency in milliseconds.
-  // We use a unified time axis across agents — gaps where an agent has no
-  // measurement become null so uPlot draws a break instead of stitching
-  // misleadingly across.
+  const isAllAgents = $derived(agentFilter === undefined);
+
+  /** Per-timestamp bucket: collects every agent's sample at that ts so we
+   *  can render either a per-agent line (specific agent selected) or a
+   *  fleet-wide aggregate (all-agents view). */
+  interface Bucket {
+    /** Mean of latency_us for the OK samples at this ts, in ms. */
+    mean_lat_ms: number | null;
+    /** Number of failed samples at this ts (across all agents). */
+    failures: number;
+    /** Total samples (ok + fail) at this ts. */
+    total: number;
+    /** Pre-aggregated success_rate when the API supplies it (m1/m5/h1
+     *  granularities); we use it directly rather than re-deriving. */
+    success_rates: number[];
+  }
+
+  // Build chart data. The shape depends on `agentFilter`:
+  //   - all agents: collapse to ONE aggregate line per metric. Latency is
+  //     the mean across agents reporting at that timestamp; loss is total
+  //     failures / total samples (or the mean of pre-aggregated
+  //     success_rate when the API gives us one).
+  //   - one agent: one line per metric, just for that agent.
+  // Using a unified time axis lets uPlot drop nulls for gaps cleanly.
   const chartData = $derived.by(() => {
     if (!series || !series.points.length) return null;
+
+    if (isAllAgents) {
+      const buckets = new Map<number, { ok_lat_us: number[]; failures: number; total: number; rates: number[] }>();
+      for (const p of series.points) {
+        const epoch = Math.floor(new Date(p.ts).getTime() / 1000);
+        let b = buckets.get(epoch);
+        if (!b) {
+          b = { ok_lat_us: [], failures: 0, total: 0, rates: [] };
+          buckets.set(epoch, b);
+        }
+        b.total += 1;
+        if (p.ok) b.ok_lat_us.push(p.latency_us);
+        else b.failures += 1;
+        if (p.success_rate !== null && p.success_rate !== undefined) {
+          b.rates.push(p.success_rate);
+        }
+      }
+      const timestamps = Array.from(buckets.keys()).sort((a, b) => a - b);
+      if (!timestamps.length) return null;
+      const latencyVals = timestamps.map((t) => {
+        const b = buckets.get(t)!;
+        if (!b.ok_lat_us.length) return null;
+        const mean = b.ok_lat_us.reduce((a, c) => a + c, 0) / b.ok_lat_us.length;
+        return mean / 1000;
+      });
+      const lossVals = timestamps.map((t) => {
+        const b = buckets.get(t)!;
+        if (b.rates.length) {
+          // Prefer the rolled-up fraction when present (more accurate at
+          // m1/m5/h1 granularity than recomputing from buckets).
+          const mean = b.rates.reduce((a, c) => a + c, 0) / b.rates.length;
+          return Math.max(0, Math.min(100, (1 - mean) * 100));
+        }
+        return b.total ? (b.failures / b.total) * 100 : 0;
+      });
+      return {
+        timestamps,
+        latencySeries: [
+          { name: 'fleet mean', color: 'var(--data-1)', values: latencyVals, unit: 'ms' }
+        ],
+        lossSeries: [
+          { name: 'fleet loss', color: 'var(--data-1)', values: lossVals, unit: '%' }
+        ]
+      };
+    }
+
+    // Specific-agent mode: one line per agent (always one when filter is set,
+    // but we keep the multi-agent code path for extensibility).
     const byAgentLatency = new Map<string, Map<number, number | null>>();
     const byAgentLoss = new Map<string, Map<number, number | null>>();
     const allTs = new Set<number>();
@@ -159,9 +227,6 @@
       }
       lat.set(epoch, p.ok ? p.latency_us / 1000 : null);
 
-      // Loss rate: prefer the rolled-up success_rate (m1/m5/h1 buckets carry
-      // a real fraction); fall back to the boolean for raw granularity so a
-      // failure shows as a 100% spike.
       let loss = byAgentLoss.get(p.agent_id);
       if (!loss) {
         loss = new Map();
@@ -248,8 +313,46 @@
         p95_ms
       });
     }
-    out.sort((a, b) => agentName(a.agent_id).localeCompare(agentName(b.agent_id)));
+    // In all-agents mode, sort by loss% desc so the noisiest hosts surface
+    // at the top of the leaderboard. When a specific agent is filtered, the
+    // alphabetic order doesn't matter (single row).
+    if (isAllAgents) {
+      out.sort((a, b) => {
+        if (b.loss_pct !== a.loss_pct) return b.loss_pct - a.loss_pct;
+        return (b.p95_ms ?? 0) - (a.p95_ms ?? 0);
+      });
+    } else {
+      out.sort((a, b) => agentName(a.agent_id).localeCompare(agentName(b.agent_id)));
+    }
     return out;
+  });
+
+  /** Fleet-wide summary across every reporting agent. Latency is the mean
+   *  of OK samples across the whole window; loss is total failures over
+   *  total attempts so a noisy minority can't drown out a healthy majority
+   *  (the per-agent leaderboard below still surfaces the offenders). */
+  const fleetSummary = $derived.by(() => {
+    if (!series || !series.points.length) return null;
+    const lats: number[] = [];
+    let failures = 0;
+    let total = 0;
+    for (const p of series.points) {
+      total += 1;
+      if (p.ok) lats.push(p.latency_us);
+      else failures += 1;
+    }
+    const sorted = lats.slice().sort((a, b) => a - b);
+    return {
+      agents: summary.length,
+      samples: total,
+      failures,
+      loss_pct: total > 0 ? (failures / total) * 100 : 0,
+      mean_ms: sorted.length ? sorted.reduce((a, b) => a + b, 0) / sorted.length / 1000 : null,
+      p50_ms: sorted.length ? sorted[Math.floor(sorted.length * 0.5)] / 1000 : null,
+      p95_ms: sorted.length
+        ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] / 1000
+        : null
+    };
   });
 
   function agentName(id: string): string {
@@ -349,47 +452,119 @@
       </div>
     </section>
 
-    <!-- Per-agent summary across the current window -->
-    {#if summary.length}
-      <section class="grid gap-3" style:grid-template-columns="repeat(auto-fit, minmax(220px, 1fr))">
-        {#each summary as s, idx (s.agent_id)}
-          {@const palette = ['var(--data-1)', 'var(--data-2)', 'var(--data-3)', 'var(--data-4)', 'var(--data-5)']}
-          <div class="rounded border border-border bg-elev-1 p-3">
-            <div class="flex items-center gap-2">
-              <span class="inline-block h-2 w-2 rounded-full" style:background={palette[idx % palette.length]}></span>
-              <span class="truncate font-mono text-xs text-fg">{agentName(s.agent_id)}</span>
-            </div>
-            <div class="mt-2 grid grid-cols-2 gap-y-1 font-mono text-2xs text-fg-tertiary">
-              <span>samples</span>
-              <span class="text-right text-fg">{s.samples}</span>
-              <span>loss</span>
-              <span
-                class="text-right"
-                class:text-fg={s.loss_pct === 0}
-                class:text-warning={s.loss_pct > 0 && s.loss_pct < 5}
-                class:text-error={s.loss_pct >= 5}
-              >
-                {s.loss_pct.toFixed(s.loss_pct < 1 ? 2 : 1)}%
-                {#if s.failures > 0}
-                  <span class="text-fg-quaternary">· {s.failures} fail</span>
-                {/if}
-              </span>
-              <span>mean</span>
-              <span class="text-right text-fg">{fmtMs(s.mean_ms)}</span>
-              <span>p50</span>
-              <span class="text-right text-fg-secondary">{fmtMs(s.p50_ms)}</span>
-              <span>p95</span>
-              <span class="text-right text-fg-secondary">{fmtMs(s.p95_ms)}</span>
+    <!-- Fleet aggregate (all-agents mode) -->
+    {#if isAllAgents && fleetSummary}
+      <section class="rounded border border-border bg-elev-1 p-4">
+        <div class="mb-2 flex items-baseline justify-between">
+          <h2 class="font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
+            fleet aggregate · last {range}
+          </h2>
+          <span class="font-mono text-2xs text-fg-quaternary">
+            {fleetSummary.agents} agent{fleetSummary.agents === 1 ? '' : 's'}
+          </span>
+        </div>
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <div>
+            <div class="font-mono text-2xs uppercase tracking-[0.12em] text-fg-quaternary">samples</div>
+            <div class="mt-0.5 font-mono text-md text-fg">{fleetSummary.samples}</div>
+          </div>
+          <div>
+            <div class="font-mono text-2xs uppercase tracking-[0.12em] text-fg-quaternary">loss</div>
+            <div
+              class="mt-0.5 font-mono text-md"
+              class:text-fg={fleetSummary.loss_pct === 0}
+              class:text-warning={fleetSummary.loss_pct > 0 && fleetSummary.loss_pct < 5}
+              class:text-error={fleetSummary.loss_pct >= 5}
+            >
+              {fleetSummary.loss_pct.toFixed(fleetSummary.loss_pct < 1 ? 2 : 1)}%
+              {#if fleetSummary.failures > 0}
+                <span class="font-mono text-2xs text-fg-quaternary">· {fleetSummary.failures} fail</span>
+              {/if}
             </div>
           </div>
-        {/each}
+          <div>
+            <div class="font-mono text-2xs uppercase tracking-[0.12em] text-fg-quaternary">mean</div>
+            <div class="mt-0.5 font-mono text-md text-fg">{fmtMs(fleetSummary.mean_ms)}</div>
+          </div>
+          <div>
+            <div class="font-mono text-2xs uppercase tracking-[0.12em] text-fg-quaternary">p50</div>
+            <div class="mt-0.5 font-mono text-md text-fg-secondary">{fmtMs(fleetSummary.p50_ms)}</div>
+          </div>
+          <div>
+            <div class="font-mono text-2xs uppercase tracking-[0.12em] text-fg-quaternary">p95</div>
+            <div class="mt-0.5 font-mono text-md text-fg-secondary">{fmtMs(fleetSummary.p95_ms)}</div>
+          </div>
+        </div>
+      </section>
+    {/if}
+
+    <!-- Per-agent breakdown. In all-agents mode this is a leaderboard
+         sorted by loss%, so the worst offenders rise to the top. When a
+         specific agent is filtered we just show that one row. -->
+    {#if summary.length}
+      <section class="rounded border border-border bg-elev-1 p-4">
+        <h2 class="mb-3 font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
+          {isAllAgents ? 'agents · sorted by loss' : 'agent'}
+        </h2>
+        <div class="overflow-hidden rounded border border-border">
+          <table class="w-full font-mono text-xs">
+            <thead class="bg-elev-2 text-2xs uppercase tracking-[0.14em] text-fg-quaternary">
+              <tr>
+                {#if isAllAgents}<th class="w-10 px-3 py-2 text-right">#</th>{/if}
+                <th class="px-3 py-2 text-left">agent</th>
+                <th class="px-3 py-2 text-right">samples</th>
+                <th class="px-3 py-2 text-right">loss</th>
+                <th class="px-3 py-2 text-right">mean</th>
+                <th class="px-3 py-2 text-right">p50</th>
+                <th class="px-3 py-2 text-right">p95</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each summary as s, idx (s.agent_id)}
+                <tr
+                  class="border-t border-border cursor-pointer hover:bg-elev-2"
+                  onclick={() => (agentFilter = s.agent_id)}
+                  title="filter to this agent"
+                >
+                  {#if isAllAgents}
+                    <td class="px-3 py-2 text-right text-fg-quaternary">{idx + 1}</td>
+                  {/if}
+                  <td class="px-3 py-2 text-fg">{agentName(s.agent_id)}</td>
+                  <td class="px-3 py-2 text-right text-fg-secondary">{s.samples}</td>
+                  <td
+                    class="px-3 py-2 text-right"
+                    class:text-fg={s.loss_pct === 0}
+                    class:text-warning={s.loss_pct > 0 && s.loss_pct < 5}
+                    class:text-error={s.loss_pct >= 5}
+                  >
+                    {s.loss_pct.toFixed(s.loss_pct < 1 ? 2 : 1)}%
+                    {#if s.failures > 0}
+                      <span class="text-fg-quaternary">· {s.failures}</span>
+                    {/if}
+                  </td>
+                  <td class="px-3 py-2 text-right text-fg">{fmtMs(s.mean_ms)}</td>
+                  <td class="px-3 py-2 text-right text-fg-secondary">{fmtMs(s.p50_ms)}</td>
+                  <td class="px-3 py-2 text-right text-fg-secondary">{fmtMs(s.p95_ms)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        {#if isAllAgents && summary.length > 1}
+          <p class="mt-2 font-mono text-2xs uppercase tracking-[0.12em] text-fg-quaternary">
+            click a row to drill into that agent
+          </p>
+        {/if}
       </section>
     {/if}
 
     <!-- Latency chart -->
     <section class="rounded border border-border bg-elev-1 p-4">
-      <div class="mb-3 font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
-        latency · last {range}
+      <div class="mb-3 flex items-center justify-between font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
+        <span>latency · last {range}</span>
+        <span class="text-fg-quaternary">
+          {isAllAgents ? 'mean across agents' : agentName(agentFilter ?? '')}
+        </span>
       </div>
       {#if chartData}
         <TimeSeriesChart
@@ -413,7 +588,7 @@
         <div class="mb-3 flex items-center justify-between font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
           <span>loss · last {range}</span>
           <span class="text-fg-quaternary">
-            {#if range === '1h'}raw — failures spike to 100%{:else}aggregated{/if}
+            {#if isAllAgents}fleet-wide{:else if range === '1h'}raw — failures spike to 100%{:else}aggregated{/if}
           </span>
         </div>
         <TimeSeriesChart
