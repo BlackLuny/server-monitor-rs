@@ -112,6 +112,91 @@ pub async fn server_metrics(
     .into_response()
 }
 
+/// One row per server with the last N seconds of raw samples folded into
+/// per-metric arrays. Used by the dashboard to seed each card's sparkline
+/// with real history instead of the previous flat-line fallback. Cheap:
+/// the table is indexed on (server_id, granularity, ts) and 60×N samples
+/// fit easily in one round-trip.
+#[derive(Serialize)]
+pub struct SparklineRow {
+    pub server_id: i64,
+    pub cpu_pct: Vec<f64>,
+    pub mem_pct: Vec<f64>,
+    pub net_in_bps: Vec<i64>,
+    pub net_out_bps: Vec<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct SparklinesQuery {
+    /// Window in seconds. Capped at 600 so a misbehaving client can't ask
+    /// for hours of raw samples on every reload.
+    #[serde(default = "default_seconds")]
+    pub seconds: u32,
+}
+
+fn default_seconds() -> u32 {
+    60
+}
+
+pub async fn server_sparklines(
+    State(state): State<AppState>,
+    Query(q): Query<SparklinesQuery>,
+) -> impl IntoResponse {
+    let seconds = q.seconds.clamp(10, 600);
+    let interval = format!("{seconds} seconds");
+
+    let rows: Result<Vec<(i64, f64, i64, i64, i64, i64)>, _> = sqlx::query_as(
+        r#"SELECT server_id, cpu_pct, mem_used, mem_total, net_in_bps, net_out_bps
+              FROM metric_snapshots
+             WHERE granularity = 'raw'
+               AND ts >= NOW() - ($1::text)::interval
+             ORDER BY server_id, ts ASC"#,
+    )
+    .bind(&interval)
+    .fetch_all(&state.pool)
+    .await;
+
+    let rows = match rows {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!(%err, "sparklines query failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    code: "internal_error",
+                    message: "sparklines query failed".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    use std::collections::HashMap;
+    let mut by_server: HashMap<i64, SparklineRow> = HashMap::new();
+    for (server_id, cpu_pct, mem_used, mem_total, net_in_bps, net_out_bps) in rows {
+        let entry = by_server
+            .entry(server_id)
+            .or_insert_with(|| SparklineRow {
+                server_id,
+                cpu_pct: Vec::new(),
+                mem_pct: Vec::new(),
+                net_in_bps: Vec::new(),
+                net_out_bps: Vec::new(),
+            });
+        let mem_pct = if mem_total > 0 {
+            (mem_used as f64 * 100.0) / mem_total as f64
+        } else {
+            0.0
+        };
+        entry.cpu_pct.push(cpu_pct);
+        entry.mem_pct.push(mem_pct);
+        entry.net_in_bps.push(net_in_bps);
+        entry.net_out_bps.push(net_out_bps);
+    }
+    let out: Vec<SparklineRow> = by_server.into_values().collect();
+    Json(out).into_response()
+}
+
 /// Choose the coarsest granularity that still gives the UI dense-enough data.
 fn pick_granularity(range: &str) -> (&'static str, &'static str) {
     match range {

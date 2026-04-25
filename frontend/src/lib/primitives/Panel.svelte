@@ -10,6 +10,12 @@
     accent?: Accent;
     interactive?: boolean;
     padded?: boolean;
+    /** When set, the panel renders as an `<a>` so the entire surface is a
+     *  single, accessible click target. The previous absolute-link overlay
+     *  trick was unreliable: any statically-positioned descendant rendered
+     *  on top of the link and swallowed clicks. */
+    href?: string;
+    ariaLabel?: string;
     class?: string;
     children?: import('svelte').Snippet;
   }
@@ -17,6 +23,8 @@
     accent = 'none',
     interactive = false,
     padded = true,
+    href,
+    ariaLabel,
     class: klass = '',
     children
   }: Props = $props();
@@ -31,9 +39,11 @@
 
   const classes = $derived(
     [
-      'relative rounded border bg-elev-1 transition-colors duration-150 ease-out-quart',
+      'relative block rounded border bg-elev-1 transition-colors duration-150 ease-out-quart',
       padded ? 'px-4 py-4' : '',
-      interactive ? 'cursor-pointer hover:bg-elev-2 hover:border-border-strong' : '',
+      interactive || href
+        ? 'cursor-pointer hover:bg-elev-2 hover:border-border-strong'
+        : '',
       klass
     ]
       .filter(Boolean)
@@ -41,12 +51,24 @@
   );
 </script>
 
-<div class={classes}>
-  {#if railColour}
-    <span
-      class="absolute left-0 top-0 h-full w-[2px] rounded-l"
-      style:background={railColour}
-    ></span>
-  {/if}
-  {@render children?.()}
-</div>
+{#if href}
+  <a {href} aria-label={ariaLabel} class={classes}>
+    {#if railColour}
+      <span
+        class="absolute left-0 top-0 h-full w-[2px] rounded-l"
+        style:background={railColour}
+      ></span>
+    {/if}
+    {@render children?.()}
+  </a>
+{:else}
+  <div class={classes}>
+    {#if railColour}
+      <span
+        class="absolute left-0 top-0 h-full w-[2px] rounded-l"
+        style:background={railColour}
+      ></span>
+    {/if}
+    {@render children?.()}
+  </div>
+{/if}

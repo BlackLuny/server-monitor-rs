@@ -23,6 +23,7 @@
   } from '$lib/primitives';
   import { goto } from '$app/navigation';
   import {
+    fetchSparklines,
     listServers,
     subscribeLive,
     type LiveUpdate,
@@ -71,19 +72,28 @@
       const res = await listServers({ guest: guestMode });
       servers = res.servers;
       lastUpdate = res.updated_at;
-      // Seed rings from the latest sample so every card shows something
-      // meaningful during the first ~60s instead of a blank line.
+
+      // Seed rings from real history so cards show the actual last 60s
+      // instead of a flat seed-and-grow line. Falls back to the latest
+      // sample if the sparklines call fails or hasn't returned yet.
+      let history: Awaited<ReturnType<typeof fetchSparklines>> = [];
+      try {
+        history = await fetchSparklines(RING_SIZE);
+      } catch {
+        history = [];
+      }
+      const byServer = new Map(history.map((row) => [row.server_id, row]));
+
       const seeded: Record<number, Ring> = { ...rings };
       for (const s of res.servers) {
         if (seeded[s.id]) continue;
-        const cpu = s.latest?.cpu_pct ?? 0;
-        const memPct = s.latest ? usagePct(s.latest.mem_used, s.latest.mem_total) : 0;
-        seeded[s.id] = {
-          cpu: Array(RING_SIZE).fill(cpu),
-          mem: Array(RING_SIZE).fill(memPct),
-          netIn: Array(RING_SIZE).fill(s.latest?.net_in_bps ?? 0),
-          netOut: Array(RING_SIZE).fill(s.latest?.net_out_bps ?? 0)
-        };
+        const past = byServer.get(s.id);
+        const cpu = padLeft(past?.cpu_pct, RING_SIZE, s.latest?.cpu_pct ?? 0);
+        const memSeed = s.latest ? usagePct(s.latest.mem_used, s.latest.mem_total) : 0;
+        const mem = padLeft(past?.mem_pct, RING_SIZE, memSeed);
+        const netIn = padLeft(past?.net_in_bps, RING_SIZE, s.latest?.net_in_bps ?? 0);
+        const netOut = padLeft(past?.net_out_bps, RING_SIZE, s.latest?.net_out_bps ?? 0);
+        seeded[s.id] = { cpu, mem, netIn, netOut };
       }
       rings = seeded;
       error = null;
@@ -92,6 +102,18 @@
     } finally {
       loading = false;
     }
+  }
+
+  /** Right-align `tail` into a fixed-size ring; pad missing prefix with
+   *  the same value so the curve "starts" at the seed instead of zero. */
+  function padLeft(tail: number[] | undefined, size: number, seed: number): number[] {
+    if (!tail || tail.length === 0) return Array(size).fill(seed);
+    const trimmed = tail.length > size ? tail.slice(tail.length - size) : tail.slice();
+    if (trimmed.length === size) return trimmed;
+    const padCount = size - trimmed.length;
+    const padValue = trimmed[0] ?? seed;
+    const out = Array(padCount).fill(padValue);
+    return out.concat(trimmed);
   }
 
   function handleLive(u: LiveUpdate) {
@@ -225,9 +247,12 @@
 {#snippet serverCard(s: ServerRow, ring: Ring | undefined, tick: number)}
   {@const ringData = ring ?? { cpu: [], mem: [], netIn: [], netOut: [] }}
   {@const memPct = s.latest ? usagePct(s.latest.mem_used, s.latest.mem_total) : 0}
-  <Panel accent={s.online ? 'online' : 'error'} interactive>
-    <a href={`/servers/${s.id}`} class="absolute inset-0" aria-label="open detail"></a>
-    <div class="relative flex items-start justify-between gap-3">
+  <Panel
+    accent={s.online ? 'online' : 'error'}
+    href={`/servers/${s.id}`}
+    ariaLabel={`Open ${s.display_name} detail`}
+  >
+    <div class="flex items-start justify-between gap-3">
       <div class="min-w-0">
         <div class="flex items-center gap-2">
           <StatusDot kind={s.online ? 'online' : 'error'} />
@@ -247,7 +272,7 @@
           </span>
         </div>
       </div>
-      <div class="relative flex items-center gap-1.5">
+      <div class="flex items-center gap-1.5">
         {#each (s.tags ?? []).slice(0, 2) as tag}
           <Badge tone="neutral">{tag}</Badge>
         {/each}
@@ -262,7 +287,7 @@
       </div>
     </div>
 
-    <div class="relative mt-4 grid grid-cols-3 gap-3">
+    <div class="mt-4 grid grid-cols-3 gap-3">
       <Stat
         label="cpu"
         value={s.latest ? percent(s.latest.cpu_pct) : '—'}
@@ -280,7 +305,7 @@
       <Stat label="load" value={s.latest ? s.latest.load_1.toFixed(2) : '—'} tone="data5" />
     </div>
 
-    <div class="relative mt-4 space-y-2">
+    <div class="mt-4 space-y-2">
       <div
         class="flex items-center justify-between font-mono text-2xs uppercase tracking-wider text-fg-tertiary"
       >

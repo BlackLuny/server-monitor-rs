@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
             "/api/servers/:id",
             patch(servers::update).delete(servers::delete_one),
         )
+        .route("/api/servers/sparklines", get(metrics::server_sparklines))
         .route("/api/servers/:id/metrics", get(metrics::server_metrics))
         // ---- groups ----
         .route("/api/groups", get(groups::list).post(groups::create))

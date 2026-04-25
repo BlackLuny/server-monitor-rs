@@ -620,6 +620,22 @@ export function listServers(opts: { guest?: boolean } = {}): Promise<ServerList>
   return getJson<ServerList>(`/api/servers${q}`);
 }
 
+/** Per-server fixed-length sparkline windows. Used to seed the dashboard
+ *  cards with real history at page-load time so the line isn't a flat
+ *  seed-and-grow. Server returns one row per server with values ordered
+ *  oldest → newest. */
+export interface SparklineRow {
+  server_id: number;
+  cpu_pct: number[];
+  mem_pct: number[];
+  net_in_bps: number[];
+  net_out_bps: number[];
+}
+
+export function fetchSparklines(seconds = 60): Promise<SparklineRow[]> {
+  return getJson<SparklineRow[]>(`/api/servers/sparklines?seconds=${seconds}`);
+}
+
 export function fetchMetrics(serverId: number, range: string): Promise<MetricsSeries> {
   return getJson<MetricsSeries>(
     `/api/servers/${serverId}/metrics?range=${encodeURIComponent(range)}`
