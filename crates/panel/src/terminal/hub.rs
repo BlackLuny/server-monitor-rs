@@ -179,15 +179,22 @@ impl TerminalHub {
             Some(error.as_str())
         };
 
+        // Race-tolerant write. The WS bridge may have already called
+        // `close_from_panel` (which seals closed_at + a generic reason),
+        // so we drop the `closed_at IS NULL` guard. Use COALESCE on every
+        // column so the *first* write wins for closed_at / exit_code /
+        // error (those are set by whoever ends the session first), and
+        // the recording metadata always wins from the agent — only the
+        // agent knows it.
         if let Err(err) = sqlx::query(
             r#"UPDATE terminal_sessions
-                   SET closed_at = NOW(),
-                       exit_code = $2,
-                       error = COALESCE($3, error),
-                       recording_path = COALESCE($4, recording_path),
-                       recording_size = COALESCE($5, recording_size),
-                       recording_sha256 = COALESCE($6, recording_sha256)
-                   WHERE id = $1 AND closed_at IS NULL"#,
+                   SET closed_at        = COALESCE(closed_at, NOW()),
+                       exit_code        = COALESCE(exit_code, $2),
+                       error            = COALESCE(error, $3),
+                       recording_path   = COALESCE(recording_path, $4),
+                       recording_size   = COALESCE(recording_size, $5),
+                       recording_sha256 = COALESCE(recording_sha256, $6)
+                   WHERE id = $1"#,
         )
         .bind(id)
         .bind(exit_code)
