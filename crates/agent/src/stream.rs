@@ -9,7 +9,7 @@ use monitor_proto::{
         panel_to_agent::Payload as DownPayload, AgentToPanel, Heartbeat, MetricBatch,
         MetricSnapshot, ProbeBatch, ProbeResult,
     },
-    SERVER_TOKEN_METADATA,
+    AGENT_VERSION_METADATA, SERVER_TOKEN_METADATA,
 };
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
@@ -120,6 +120,9 @@ async fn run_once(
     let mut req = tonic::Request::new(ReceiverStream::new(up_rx));
     req.metadata_mut()
         .insert(SERVER_TOKEN_METADATA, server_token.parse().unwrap());
+    if let Ok(v) = monitor_common::VERSION.parse() {
+        req.metadata_mut().insert(AGENT_VERSION_METADATA, v);
+    }
 
     let response = client.stream(req).await?;
     let mut inbound = response.into_inner();

@@ -22,3 +22,9 @@ pub mod v1 {
 /// gRPC metadata header name the agent uses to present its long-lived token
 /// on the [`v1::agent_service_client::AgentServiceClient::stream`] RPC.
 pub const SERVER_TOKEN_METADATA: &str = "x-server-token";
+
+/// gRPC metadata header carrying the agent's binary version on every Stream
+/// open. The panel updates `servers.agent_version` from this on connect, so
+/// a supervisor-driven A/B swap reflects on the dashboard immediately
+/// without waiting for the next Register (which only fires on first install).
+pub const AGENT_VERSION_METADATA: &str = "x-agent-version";

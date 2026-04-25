@@ -150,7 +150,34 @@ impl AgentService for AgentServiceImpl {
         let token = extract_server_token(&request)?;
         let (agent_id, server_row_id) = lookup_agent_by_token(self.pool(), &token).await?;
 
-        tracing::info!(%agent_id, "agent connected (stream)");
+        // Optional `x-agent-version` metadata: the agent reports the binary
+        // version it's currently running. Used by the supervisor flow so a
+        // post-swap stream open refreshes `servers.agent_version` without
+        // waiting for a Register (which only happens on first install).
+        let agent_version = request
+            .metadata()
+            .get(monitor_proto::AGENT_VERSION_METADATA)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        if let Some(ref v) = agent_version {
+            if !v.is_empty() {
+                if let Err(err) = sqlx::query(
+                    "UPDATE servers SET agent_version = $1 WHERE id = $2 AND agent_version IS DISTINCT FROM $1",
+                )
+                .bind(v)
+                .bind(server_row_id)
+                .execute(self.pool())
+                .await
+                {
+                    tracing::warn!(%err, %agent_id, "agent_version refresh failed");
+                }
+                if let Err(err) = mark_assignments_for_version(self.pool(), agent_id, v).await {
+                    tracing::warn!(%err, "post-stream assignment correlation failed");
+                }
+            }
+        }
+
+        tracing::info!(%agent_id, version = agent_version.as_deref().unwrap_or("?"), "agent connected (stream)");
 
         let (session, rx) = self.state.hub.register(agent_id, server_row_id);
         let inbound = request.into_inner();
