@@ -220,38 +220,61 @@ fi
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+fetch_archive() {
+    local artefact=$1
+    local url="${RELEASE_URL_BASE%/}/${VERSION}/${artefact}-${TARGET_TRIPLE}.tar.gz"
+    info "downloading $url"
+    if command -v curl >/dev/null 2>&1; then
+        run curl -fsSL --retry 3 -o "$TMP_DIR/${artefact}.tar.gz" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        run wget -q -O "$TMP_DIR/${artefact}.tar.gz" "$url"
+    else
+        fatal "need curl or wget to download the release"
+    fi
+    local extract_dir="$TMP_DIR/${artefact}-extracted"
+    run mkdir -p "$extract_dir"
+    run tar -C "$extract_dir" -xzf "$TMP_DIR/${artefact}.tar.gz"
+    local found
+    found=$(find "$extract_dir" -name "$artefact" -type f | head -1)
+    [[ -n $found ]] || fatal "expected $artefact in tarball — wrong target?"
+    cp "$found" "$TMP_DIR/$artefact"
+    chmod +x "$TMP_DIR/$artefact"
+}
+
 if [[ -n $LOCAL_BINARY ]]; then
     [[ -f $LOCAL_BINARY ]] || fatal "--local-binary $LOCAL_BINARY not found"
     info "using local binary $LOCAL_BINARY"
     cp "$LOCAL_BINARY" "$TMP_DIR/monitor-agent"
     chmod +x "$TMP_DIR/monitor-agent"
+    # Supervisor sits next to the agent binary in the local-binary path so
+    # M7 self-update works without a network fetch.
+    if [[ -f "$(dirname "$LOCAL_BINARY")/monitor-agent-supervisor" ]]; then
+        cp "$(dirname "$LOCAL_BINARY")/monitor-agent-supervisor" "$TMP_DIR/monitor-agent-supervisor"
+        chmod +x "$TMP_DIR/monitor-agent-supervisor"
+    else
+        warn "monitor-agent-supervisor not found next to --local-binary; self-update will be unavailable"
+    fi
 else
     if [[ -z $RELEASE_URL_BASE ]]; then
-        # M7 will fill this in. Until then, the script needs an explicit URL
-        # or --local-binary so users don't get a surprise placeholder fetch.
-        fatal "no release URL configured yet — pass --local-binary <path> or --release-url <base> (M7 will set a default)"
+        fatal "no release URL configured yet — pass --local-binary <path> or --release-url <base>"
     fi
-    EXT="tar.gz"
-    URL="${RELEASE_URL_BASE%/}/${VERSION}/monitor-agent-${TARGET_TRIPLE}.${EXT}"
-    info "downloading $URL"
-    if command -v curl >/dev/null 2>&1; then
-        run curl -fsSL --retry 3 -o "$TMP_DIR/agent.tar.gz" "$URL"
-    elif command -v wget >/dev/null 2>&1; then
-        run wget -q -O "$TMP_DIR/agent.tar.gz" "$URL"
-    else
-        fatal "need curl or wget to download the release"
-    fi
-    run tar -C "$TMP_DIR" -xzf "$TMP_DIR/agent.tar.gz"
-    [[ -f "$TMP_DIR/monitor-agent" ]] || fatal "expected monitor-agent in tarball — wrong target?"
-    chmod +x "$TMP_DIR/monitor-agent"
+    fetch_archive monitor-agent
+    fetch_archive monitor-agent-supervisor
 fi
 
 # -----------------------------------------------------------------------------
 # Layout
 # -----------------------------------------------------------------------------
 info "creating layout"
-run mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$RECORDINGS_DIR" "$LOG_DIR"
+VERSIONS_DIR="$DATA_DIR/versions"
+RUNTIME_DIR="/run/monitor-agent"
+[[ $OS = macos ]] && RUNTIME_DIR="$DATA_DIR/run"
+run mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$RECORDINGS_DIR" "$LOG_DIR" "$VERSIONS_DIR" "$RUNTIME_DIR"
 run install -m 0755 "$TMP_DIR/monitor-agent" "$INSTALL_DIR/monitor-agent"
+if [[ -f "$TMP_DIR/monitor-agent-supervisor" ]]; then
+    run install -m 0755 "$TMP_DIR/monitor-agent-supervisor" "$INSTALL_DIR/monitor-agent-supervisor"
+fi
+SUPERVISOR_SOCKET="$RUNTIME_DIR/supervisor.sock"
 
 # -----------------------------------------------------------------------------
 # Service user (Linux only — macOS launchd runs as root unless told otherwise)
@@ -313,6 +336,15 @@ write_systemd_unit() {
         echo "+ cat > $unit"
         return
     fi
+    # ExecStart prefers the supervisor when it's installed — that's the
+    # path that supports M7 self-update. Falls back to running the agent
+    # directly when only the agent binary was shipped.
+    local exec_start
+    if [[ -x "${INSTALL_DIR}/monitor-agent-supervisor" ]]; then
+        exec_start="${INSTALL_DIR}/monitor-agent-supervisor --root ${DATA_DIR} --agent-binary ${INSTALL_DIR}/monitor-agent --ipc-path ${SUPERVISOR_SOCKET} -- run"
+    else
+        exec_start="${INSTALL_DIR}/monitor-agent run"
+    fi
     cat > "$unit" <<UNIT
 [Unit]
 Description=server-monitor-rs agent
@@ -323,7 +355,10 @@ Wants=network-online.target
 Type=simple
 User=${USER_RUNAS}
 Environment=MONITOR_AGENT_CONFIG=${AGENT_CONFIG}
-ExecStart=${INSTALL_DIR}/monitor-agent run
+Environment=MONITOR_SUPERVISOR_IPC=${SUPERVISOR_SOCKET}
+RuntimeDirectory=monitor-agent
+RuntimeDirectoryMode=0750
+ExecStart=${exec_start}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -347,17 +382,26 @@ write_openrc_unit() {
         echo "+ cat > $unit"
         return
     fi
+    local cmd args
+    if [[ -x "${INSTALL_DIR}/monitor-agent-supervisor" ]]; then
+        cmd="${INSTALL_DIR}/monitor-agent-supervisor"
+        args="--root ${DATA_DIR} --agent-binary ${INSTALL_DIR}/monitor-agent --ipc-path ${SUPERVISOR_SOCKET} -- run"
+    else
+        cmd="${INSTALL_DIR}/monitor-agent"
+        args="run"
+    fi
     cat > "$unit" <<UNIT
 #!/sbin/openrc-run
 description="server-monitor-rs agent"
-command="${INSTALL_DIR}/monitor-agent"
-command_args="run"
+command="${cmd}"
+command_args="${args}"
 command_user="${USER_RUNAS}"
 command_background=yes
 pidfile="/run/${SERVICE_NAME}.pid"
 output_log="${LOG_DIR}/agent.log"
 error_log="${LOG_DIR}/agent.log"
 export MONITOR_AGENT_CONFIG="${AGENT_CONFIG}"
+export MONITOR_SUPERVISOR_IPC="${SUPERVISOR_SOCKET}"
 
 depend() {
     need net
@@ -373,6 +417,17 @@ write_launchd_plist() {
         echo "+ cat > $plist"
         return
     fi
+    local prog_args
+    if [[ -x "${INSTALL_DIR}/monitor-agent-supervisor" ]]; then
+        prog_args="<string>${INSTALL_DIR}/monitor-agent-supervisor</string>
+        <string>--root</string><string>${DATA_DIR}</string>
+        <string>--agent-binary</string><string>${INSTALL_DIR}/monitor-agent</string>
+        <string>--ipc-path</string><string>${SUPERVISOR_SOCKET}</string>
+        <string>--</string><string>run</string>"
+    else
+        prog_args="<string>${INSTALL_DIR}/monitor-agent</string>
+        <string>run</string>"
+    fi
     cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -382,13 +437,14 @@ write_launchd_plist() {
     <string>com.blackluny.${SERVICE_NAME}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${INSTALL_DIR}/monitor-agent</string>
-        <string>run</string>
+        ${prog_args}
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>MONITOR_AGENT_CONFIG</key>
         <string>${AGENT_CONFIG}</string>
+        <key>MONITOR_SUPERVISOR_IPC</key>
+        <string>${SUPERVISOR_SOCKET}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

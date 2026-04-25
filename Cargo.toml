@@ -98,6 +98,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Terminal / pty (Agent-side, M5)
 portable-pty = "0.8"
 
+# Self-update support (Supervisor-side, M7)
+flate2 = "1"
+tar = "0.4"
+
 # Utility
 uuid = { version = "1", features = ["v4", "serde"] }
 time = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }

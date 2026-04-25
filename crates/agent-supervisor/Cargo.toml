@@ -11,6 +11,10 @@ default-run = "monitor-agent-supervisor"
 [lints]
 workspace = true
 
+[lib]
+name = "monitor_agent_supervisor"
+path = "src/lib.rs"
+
 [[bin]]
 name = "monitor-agent-supervisor"
 path = "src/main.rs"
@@ -26,4 +30,17 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+hyper = { workspace = true }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["tokio"] }

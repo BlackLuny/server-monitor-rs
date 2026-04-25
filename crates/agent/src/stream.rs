@@ -159,7 +159,13 @@ async fn run_once(
             msg = inbound.next() => {
                 match msg {
                     Some(Ok(panel_msg)) => {
-                        handle_panel_msg(panel_msg, &mut probe_sched, &mut terminals);
+                        handle_panel_msg(
+                            panel_msg,
+                            &mut probe_sched,
+                            &mut terminals,
+                            &up_tx,
+                            &mut seq,
+                        );
                     }
                     Some(Err(status)) => {
                         terminals.shutdown_all();
@@ -213,6 +219,8 @@ fn handle_panel_msg(
     msg: monitor_proto::v1::PanelToAgent,
     sched: &mut Scheduler,
     terminals: &mut TerminalManager,
+    up_tx: &mpsc::Sender<AgentToPanel>,
+    seq: &mut u64,
 ) {
     let Some(payload) = msg.payload else { return };
     match payload {
@@ -233,10 +241,25 @@ fn handle_panel_msg(
         DownPayload::TerminalInput(input) => terminals.input(input),
         DownPayload::TerminalResize(rs) => terminals.resize(rs),
         DownPayload::TerminalClose(c) => terminals.close(c),
-        // Acks and self-update payloads are handled in later milestones.
-        DownPayload::Ack(_) | DownPayload::Update(_) | DownPayload::UpdateAbort(_) => {
-            tracing::debug!("ignoring panel→agent payload not yet handled");
+        DownPayload::Update(cmd) => {
+            // The agent never replaces itself. Forwarding to the supervisor
+            // happens on a separate task so the stream loop keeps reading
+            // metrics + heartbeats.
+            let upstream = up_tx.clone();
+            let seq_for_task = *seq;
+            *seq = seq.saturating_add(2); // reserve room for status frames
+            tokio::spawn(async move {
+                let mut local_seq = seq_for_task;
+                crate::updates::handle_update(cmd, upstream, &mut local_seq).await;
+            });
         }
+        DownPayload::UpdateAbort(_abort) => {
+            // Aborts arrive after the supervisor has already kicked off the
+            // download — there's no public IPC for "cancel mid-flight" yet,
+            // so we just log. M7.1 can wire this through if needed.
+            tracing::info!("update abort received; no in-flight cancellation today");
+        }
+        DownPayload::Ack(_) => {}
     }
 }
 

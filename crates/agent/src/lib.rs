@@ -11,3 +11,4 @@ pub mod register;
 pub mod stream;
 pub mod terminal;
 pub mod transport;
+pub mod updates;

@@ -1,12 +1,11 @@
-//! monitor-agent-supervisor — the long-lived process the OS service manager
-//! (systemd / launchd / OpenRC / Windows Service) actually launches.
+//! monitor-agent-supervisor — long-lived process the OS service manager
+//! launches.
 //!
-//! M1 scope (this file): launch the agent child process, forward signals,
-//! restart with exponential backoff on non-zero exit, stop cleanly on SIGTERM.
-//!
-//! M7 scope (future): IPC with the agent for self-update coordination,
-//! atomic swap of `agent` symlink, grace-period probing of the new version,
-//! automatic rollback to `last_known_good`.
+//! Phase 1 / M1: launch the agent, restart on exit, forward signals.
+//! Phase 7 / M7: receive update commands over IPC, stage them into
+//! `versions/<v>/`, perform an atomic A/B swap of the `agent` symlink,
+//! and watchdog the new process for `grace_s` seconds before confirming.
+//! Failure inside the grace window rolls back to `last_known_good`.
 
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -16,11 +15,17 @@ use anyhow::Context;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
+use tokio::sync::{mpsc, oneshot, watch};
+
+use monitor_agent_supervisor::{ipc, staging};
 
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Resets the backoff if the agent stayed up at least this long before exiting.
 const STABLE_RUN_THRESHOLD: Duration = Duration::from_secs(30);
+/// Default grace period when the panel doesn't pin one. Long enough that an
+/// agent which connects + heartbeats has actually proved itself.
+const DEFAULT_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -38,23 +43,30 @@ struct Cli {
     #[arg(long)]
     agent_binary: Option<PathBuf>,
 
+    /// Override the IPC socket / named pipe path.
+    #[arg(long, env = "MONITOR_SUPERVISOR_IPC")]
+    ipc_path: Option<PathBuf>,
+
     /// Extra arguments passed through to the agent. Defaults to `["run"]`.
     #[arg(last = true)]
     agent_args: Vec<String>,
 }
 
-/// Persistent supervisor state. M1 reads it if it exists; M7 will write to it
-/// during update coordination (current / staging / last_known_good).
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// Persistent supervisor state.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct State {
+    /// Version directory we currently launch (`versions/<current>/`).
     current: Option<String>,
+    /// Most recent version that proved stable in its grace window.
     last_known_good: Option<String>,
+    /// Mid-update "next" pin — if a swap fails the run-loop reverts.
     #[serde(default)]
     staging: Option<String>,
+    /// Versions that hit a rollback. Capped at the most recent 5.
+    #[serde(default)]
+    failed_versions: Vec<String>,
 }
 
-// Explicit `return` in cfg-gated arms makes it obvious that exactly one is
-// reachable per platform; clippy would otherwise flag them as needless.
 #[allow(clippy::needless_return)]
 fn default_root() -> PathBuf {
     #[cfg(target_os = "linux")]
@@ -67,9 +79,9 @@ fn default_root() -> PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
-        let base = std::env::var_os("ProgramFiles")
+        let base = std::env::var_os("ProgramData")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("C:\\Program Files"));
+            .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"));
         return base.join("monitor-agent");
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -78,8 +90,12 @@ fn default_root() -> PathBuf {
     }
 }
 
+fn state_path(root: &Path) -> PathBuf {
+    root.join("state.json")
+}
+
 fn load_state(root: &Path) -> State {
-    let path = root.join("state.json");
+    let path = state_path(root);
     match std::fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|err| {
             tracing::warn!(%err, path = %path.display(), "state.json malformed — using defaults");
@@ -93,23 +109,49 @@ fn load_state(root: &Path) -> State {
     }
 }
 
-fn resolve_agent_binary(root: &Path, state: &State, override_path: Option<&Path>) -> PathBuf {
+fn save_state(root: &Path, state: &State) {
+    let path = state_path(root);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = match serde_json::to_vec_pretty(state) {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::warn!(%err, "could not serialise state");
+            return;
+        }
+    };
+    if let Err(err) = std::fs::write(&tmp, &body) {
+        tracing::warn!(%err, "could not write state.json.tmp");
+        return;
+    }
+    if let Err(err) = std::fs::rename(&tmp, &path) {
+        tracing::warn!(%err, "could not commit state.json");
+    }
+}
+
+fn agent_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "monitor-agent.exe"
+    } else {
+        "monitor-agent"
+    }
+}
+
+fn current_agent_binary(root: &Path, state: &State, override_path: Option<&Path>) -> PathBuf {
     if let Some(p) = override_path {
         return p.to_path_buf();
     }
     if let Some(ref v) = state.current {
         return root.join("versions").join(v).join(agent_bin_name());
     }
-    // Fallback: `<root>/agent` (symlink typically maintained by the installer).
-    root.join(agent_bin_name())
+    // Fallback: `<root>/bin/<agent>` (matches install-agent.sh layout).
+    root.join("bin").join(agent_bin_name())
 }
 
-fn agent_bin_name() -> &'static str {
-    if cfg!(windows) {
-        "agent.exe"
-    } else {
-        "agent"
-    }
+fn versions_dir(root: &Path) -> PathBuf {
+    root.join("versions")
 }
 
 #[tokio::main]
@@ -125,8 +167,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let root = cli.root.clone().unwrap_or_else(default_root);
     let state = load_state(&root);
-
-    let agent_binary = resolve_agent_binary(&root, &state, cli.agent_binary.as_deref());
     let agent_args = if cli.agent_args.is_empty() {
         vec!["run".to_string()]
     } else {
@@ -136,21 +176,47 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         version = monitor_common::VERSION,
         root = %root.display(),
-        agent = %agent_binary.display(),
-        ?agent_args,
         current_version = state.current.as_deref().unwrap_or("<unset>"),
+        last_known_good = state.last_known_good.as_deref().unwrap_or("<none>"),
         "supervisor starting",
     );
 
     let shutdown = install_shutdown_handler();
-    run_loop(&agent_binary, &agent_args, shutdown).await
+
+    // IPC channel: the listener pushes (Request, oneshot<Response>) tuples;
+    // the run-loop owns serialisation of update operations.
+    let (ipc_tx, ipc_rx) = mpsc::channel::<(ipc::Request, oneshot::Sender<ipc::Response>)>(8);
+    let ipc_path = cli.ipc_path.clone().unwrap_or_else(ipc::default_ipc_path);
+    let ipc_handle = tokio::spawn({
+        let path = ipc_path.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            if let Err(err) = ipc::serve(path, ipc_tx, shutdown).await {
+                tracing::error!(%err, "ipc server failed");
+            }
+        }
+    });
+
+    let exit = run_loop(LoopCtx {
+        root,
+        state,
+        agent_args,
+        agent_binary_override: cli.agent_binary,
+        ipc_path,
+        ipc_rx,
+        shutdown,
+    })
+    .await;
+
+    let _ = ipc_handle.await;
+    exit
 }
 
 /// Watch channel: flipped to `true` when SIGTERM/SIGINT arrives.
-type ShutdownRx = tokio::sync::watch::Receiver<bool>;
+type ShutdownRx = watch::Receiver<bool>;
 
 fn install_shutdown_handler() -> ShutdownRx {
-    let (tx, rx) = tokio::sync::watch::channel(false);
+    let (tx, rx) = watch::channel(false);
     tokio::spawn(async move {
         wait_for_signal().await;
         let _ = tx.send(true);
@@ -175,21 +241,43 @@ async fn wait_for_signal() {
     tracing::info!("Ctrl-C");
 }
 
-/// Supervisor main loop: launch the agent, watch it, restart with backoff.
-async fn run_loop(
-    agent_binary: &Path,
-    agent_args: &[String],
-    mut shutdown: ShutdownRx,
-) -> anyhow::Result<()> {
+struct LoopCtx {
+    root: PathBuf,
+    state: State,
+    agent_args: Vec<String>,
+    agent_binary_override: Option<PathBuf>,
+    ipc_path: PathBuf,
+    ipc_rx: mpsc::Receiver<(ipc::Request, oneshot::Sender<ipc::Response>)>,
+    shutdown: ShutdownRx,
+}
+
+/// Holding-pen for an in-flight rollout. Set by IPC, consumed by the run
+/// loop on the next agent restart so the swap happens in a single place.
+struct PendingSwap {
+    new_version: String,
+    new_binary: PathBuf,
+    grace: Duration,
+}
+
+async fn run_loop(mut ctx: LoopCtx) -> anyhow::Result<()> {
     let mut backoff = MIN_BACKOFF;
+    let mut pending_swap: Option<PendingSwap> = None;
+    let mut grace_window: Option<(String, Instant, Duration)> = None;
 
     loop {
-        if *shutdown.borrow() {
+        if *ctx.shutdown.borrow() {
             return Ok(());
         }
 
+        // Apply any swap requested via IPC since we last looped.
+        if let Some(swap) = pending_swap.take() {
+            apply_swap(&mut ctx, swap, &mut grace_window);
+        }
+
+        let agent_binary =
+            current_agent_binary(&ctx.root, &ctx.state, ctx.agent_binary_override.as_deref());
         let started_at = Instant::now();
-        let child = spawn_agent(agent_binary, agent_args).await;
+        let child = spawn_agent(&agent_binary, &ctx.agent_args, &ctx.ipc_path).await;
 
         let child = match child {
             Ok(c) => c,
@@ -197,18 +285,36 @@ async fn run_loop(
                 tracing::error!(%err, "failed to spawn agent");
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
-                    _ = shutdown.changed() => return Ok(()),
+                    _ = ctx.shutdown.changed() => return Ok(()),
                 }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
         };
 
-        let status = run_child(child, &mut shutdown).await?;
+        let status = run_child(child, &mut ctx, &mut pending_swap).await?;
         let uptime = started_at.elapsed();
 
-        if *shutdown.borrow() {
+        if *ctx.shutdown.borrow() {
             return Ok(());
+        }
+
+        // Resolve any open grace window.
+        if let Some((version, started, grace)) = grace_window.take() {
+            if uptime >= grace {
+                confirm_version(&mut ctx, &version);
+            } else {
+                tracing::warn!(
+                    version,
+                    uptime_s = uptime.as_secs(),
+                    grace_s = grace.as_secs(),
+                    "agent exited inside grace window — rolling back"
+                );
+                rollback(&mut ctx, &version);
+            }
+            // Suppress the "unused" warning when grace_window's start time
+            // turns out to be a no-op data point in the success path.
+            let _ = started;
         }
 
         if status.success() {
@@ -223,15 +329,95 @@ async fn run_loop(
 
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
-            _ = shutdown.changed() => return Ok(()),
+            _ = ctx.shutdown.changed() => return Ok(()),
         }
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
-async fn spawn_agent(binary: &Path, args: &[String]) -> anyhow::Result<Child> {
+fn apply_swap(
+    ctx: &mut LoopCtx,
+    swap: PendingSwap,
+    grace_window: &mut Option<(String, Instant, Duration)>,
+) {
+    let previous = ctx.state.current.clone();
+    tracing::info!(
+        from = previous.as_deref().unwrap_or("<unset>"),
+        to = %swap.new_version,
+        binary = %swap.new_binary.display(),
+        "applying staged swap"
+    );
+    ctx.state.staging = None;
+    ctx.state.last_known_good = previous;
+    ctx.state.current = Some(swap.new_version.clone());
+    save_state(&ctx.root, &ctx.state);
+    *grace_window = Some((swap.new_version, Instant::now(), swap.grace));
+}
+
+fn confirm_version(ctx: &mut LoopCtx, version: &str) {
+    tracing::info!(version, "swap confirmed");
+    if ctx.state.current.as_deref() == Some(version) {
+        ctx.state.last_known_good = Some(version.to_owned());
+        save_state(&ctx.root, &ctx.state);
+    }
+    prune_old_versions(ctx);
+}
+
+fn rollback(ctx: &mut LoopCtx, failed_version: &str) {
+    let lkg = ctx.state.last_known_good.clone();
+    record_failed(ctx, failed_version);
+    if let Some(prev) = lkg {
+        tracing::info!(failed = failed_version, restoring = %prev, "rolling back");
+        ctx.state.current = Some(prev);
+    } else {
+        tracing::error!(
+            failed = failed_version,
+            "no last_known_good to roll back to — supervisor will keep retrying"
+        );
+        ctx.state.current = None;
+    }
+    ctx.state.staging = None;
+    save_state(&ctx.root, &ctx.state);
+}
+
+fn record_failed(ctx: &mut LoopCtx, version: &str) {
+    if !ctx.state.failed_versions.contains(&version.to_owned()) {
+        ctx.state.failed_versions.push(version.to_owned());
+    }
+    while ctx.state.failed_versions.len() > 5 {
+        ctx.state.failed_versions.remove(0);
+    }
+}
+
+fn prune_old_versions(ctx: &mut LoopCtx) {
+    let keep: Vec<String> = [ctx.state.current.clone(), ctx.state.last_known_good.clone()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let dir = versions_dir(&ctx.root);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut existing: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    existing.sort();
+    while existing.len() > 3 {
+        let candidate = existing.remove(0);
+        if !keep.contains(&candidate) {
+            tracing::info!(version = %candidate, "removing old version directory");
+            let _ = std::fs::remove_dir_all(dir.join(candidate));
+        }
+    }
+}
+
+async fn spawn_agent(binary: &Path, args: &[String], ipc_path: &Path) -> anyhow::Result<Child> {
     Command::new(binary)
         .args(args)
+        .env("MONITOR_SUPERVISOR_IPC", ipc_path)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
@@ -239,33 +425,91 @@ async fn spawn_agent(binary: &Path, args: &[String]) -> anyhow::Result<Child> {
         .with_context(|| format!("spawning {}", binary.display()))
 }
 
-async fn run_child(mut child: Child, shutdown: &mut ShutdownRx) -> anyhow::Result<ExitStatus> {
-    tokio::select! {
-        result = child.wait() => Ok(result.context("waiting for agent exit")?),
-        _ = shutdown.changed() => {
-            tracing::info!("forwarding shutdown to agent");
-            // Best-effort graceful termination.
-            #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                // SAFETY: `kill(2)` with a process ID we just spawned is a
-                // well-defined syscall; any failure is logged by the caller's
-                // subsequent `wait`.
-                #[allow(unsafe_code)]
-                unsafe {
-                    libc_kill(pid as i32, 15 /* SIGTERM */);
+async fn run_child(
+    mut child: Child,
+    ctx: &mut LoopCtx,
+    pending_swap: &mut Option<PendingSwap>,
+) -> anyhow::Result<ExitStatus> {
+    loop {
+        tokio::select! {
+            result = child.wait() => {
+                return result.context("waiting for agent exit");
+            }
+            ipc_msg = ctx.ipc_rx.recv() => {
+                match ipc_msg {
+                    Some((request, reply)) => {
+                        let resp = handle_ipc(ctx, request, pending_swap);
+                        let _ = reply.send(resp);
+                        // If a swap was registered, kill the agent so the
+                        // outer loop can restart with the new binary.
+                        if pending_swap.is_some() {
+                            tracing::info!("agent restart triggered for swap");
+                            let _ = child.kill().await;
+                        }
+                    }
+                    None => continue,
                 }
             }
-            #[cfg(not(unix))]
-            {
-                let _ = child.start_kill();
+            _ = ctx.shutdown.changed() => {
+                tracing::info!("forwarding shutdown to agent");
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        libc_kill(pid as i32, 15 /* SIGTERM */);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = child.start_kill();
+                }
+                match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+                    Ok(res) => return res.context("waiting for agent graceful exit"),
+                    Err(_) => {
+                        tracing::warn!("agent did not exit within 10s — killing");
+                        let _ = child.kill().await;
+                        return child.wait().await.context("waiting after kill");
+                    }
+                }
             }
-            // Give the agent up to 10s to quit; then force-kill.
-            match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
-                Ok(res) => Ok(res.context("waiting for agent graceful exit")?),
-                Err(_) => {
-                    tracing::warn!("agent did not exit within 10s — killing");
-                    let _ = child.kill().await;
-                    Ok(child.wait().await.context("waiting after kill")?)
+        }
+    }
+}
+
+fn handle_ipc(
+    ctx: &mut LoopCtx,
+    request: ipc::Request,
+    pending_swap: &mut Option<PendingSwap>,
+) -> ipc::Response {
+    match request {
+        ipc::Request::Update {
+            rollout_id,
+            version,
+            asset_url,
+            sha256,
+            attestation_url: _,
+            grace_s,
+        } => {
+            tracing::info!(%rollout_id, %version, "supervisor received update request");
+            ctx.state.staging = Some(version.clone());
+            save_state(&ctx.root, &ctx.state);
+            let versions = versions_dir(&ctx.root);
+            let runtime = tokio::runtime::Handle::current();
+            let result = runtime.block_on(staging::stage(&versions, &version, &asset_url, &sha256));
+            match result {
+                Ok(staged) => {
+                    *pending_swap = Some(PendingSwap {
+                        new_version: version,
+                        new_binary: staged.agent_binary,
+                        grace: Duration::from_secs(u64::from(grace_s.max(1))).max(DEFAULT_GRACE),
+                    });
+                    ipc::Response::ok()
+                }
+                Err(err) => {
+                    tracing::warn!(%err, version, "staging failed");
+                    ctx.state.staging = None;
+                    save_state(&ctx.root, &ctx.state);
+                    ipc::Response::error(err.to_string())
                 }
             }
         }
@@ -275,8 +519,6 @@ async fn run_child(mut child: Child, shutdown: &mut ShutdownRx) -> anyhow::Resul
 #[cfg(unix)]
 #[allow(unsafe_code)]
 unsafe fn libc_kill(pid: i32, sig: i32) {
-    // Avoids pulling `libc` just for this single FFI call. A failure returns -1
-    // and we rely on the subsequent `wait()` to reap the process anyway.
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }

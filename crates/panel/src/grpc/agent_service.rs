@@ -125,6 +125,15 @@ impl AgentService for AgentServiceImpl {
             "agent registered",
         );
 
+        // Version correlation: if this agent is the target of any active
+        // assignment whose `version` matches what just registered, that's
+        // unambiguous proof the upgrade succeeded.
+        if let Err(err) =
+            mark_assignments_for_version(self.pool(), agent_id, &req.agent_version).await
+        {
+            tracing::warn!(%err, "post-register assignment correlation failed");
+        }
+
         Ok(Response::new(RegisterResponse {
             agent_id: agent_id.to_string(),
             server_token,
@@ -253,9 +262,99 @@ async fn handle_payload(
         AgentPayload::TerminalClosed(closed) => {
             state.terminal_hub.deliver_closed(&state.pool, closed).await;
         }
-        // M7 will handle update status.
-        AgentPayload::UpdateStatus(_) => {}
+        AgentPayload::UpdateStatus(status) => {
+            ingest_update_status(state, session, status).await;
+        }
     }
+}
+
+async fn ingest_update_status(
+    state: &AppState,
+    session: &crate::grpc::AgentSession,
+    status: monitor_proto::v1::UpdateStatus,
+) {
+    use monitor_proto::v1::UpdateState;
+    let Ok(rollout_id) = status.rollout_id.parse::<i64>() else {
+        tracing::debug!(rollout = %status.rollout_id, "ignoring UpdateStatus with non-numeric rollout_id");
+        return;
+    };
+    // Map proto state → assignment state. Anything terminal (Confirmed,
+    // Failed, RolledBack) flips the row; intermediate states bump the
+    // textual `last_status_message` so an admin watching the UI sees
+    // progress without us churning the state column.
+    let parsed = UpdateState::try_from(status.state).unwrap_or(UpdateState::Unspecified);
+    let new_state = match parsed {
+        UpdateState::Confirmed => Some("succeeded"),
+        UpdateState::Failed | UpdateState::RolledBack => Some("failed"),
+        UpdateState::Downloading | UpdateState::Probing | UpdateState::Switching => Some("sent"),
+        _ => None,
+    };
+    let detail = if status.detail.is_empty() {
+        None
+    } else {
+        Some(status.detail.clone())
+    };
+
+    if let Some(target_state) = new_state {
+        if let Err(err) = sqlx::query(
+            r#"UPDATE update_assignments
+                   SET state = $1,
+                       last_status_message = COALESCE($2, last_status_message),
+                       updated_at = NOW()
+                   WHERE rollout_id = $3 AND agent_id = $4"#,
+        )
+        .bind(target_state)
+        .bind(detail.as_deref())
+        .bind(rollout_id)
+        .bind(session.agent_id)
+        .execute(&state.pool)
+        .await
+        {
+            tracing::warn!(%err, "update assignment write failed");
+        }
+    } else if let Some(d) = detail.as_deref() {
+        if let Err(err) = sqlx::query(
+            r#"UPDATE update_assignments
+                   SET last_status_message = $1, updated_at = NOW()
+                   WHERE rollout_id = $2 AND agent_id = $3"#,
+        )
+        .bind(d)
+        .bind(rollout_id)
+        .bind(session.agent_id)
+        .execute(&state.pool)
+        .await
+        {
+            tracing::warn!(%err, "update assignment status write failed");
+        }
+    }
+
+    // Best-effort: when every assignment for the rollout is terminal,
+    // mark the rollout itself as completed. Aborted/paused take precedence
+    // and are handled in the API layer.
+    if let Err(err) = maybe_mark_completed(state, rollout_id).await {
+        tracing::debug!(%err, "rollout completion check failed");
+    }
+}
+
+async fn maybe_mark_completed(state: &AppState, rollout_id: i64) -> Result<(), sqlx::Error> {
+    let pending: Option<(i64,)> = sqlx::query_as(
+        r#"SELECT COUNT(*) FROM update_assignments
+              WHERE rollout_id = $1 AND state IN ('pending', 'sent')"#,
+    )
+    .bind(rollout_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if pending.map(|(c,)| c).unwrap_or(0) == 0 {
+        sqlx::query(
+            r#"UPDATE update_rollouts
+                   SET state = 'completed', finished_at = COALESCE(finished_at, NOW())
+                   WHERE id = $1 AND state IN ('pending', 'active')"#,
+        )
+        .bind(rollout_id)
+        .execute(&state.pool)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn ingest_probe_results(
@@ -330,4 +429,36 @@ async fn ingest_and_broadcast(
 fn internal_db_error(err: sqlx::Error) -> Status {
     tracing::error!(%err, "database error in AgentService");
     Status::internal("database error")
+}
+
+/// On Register, look up any open rollout assignments whose target version
+/// matches the agent_version this agent reported. A match means the swap
+/// took — we mark the assignment succeeded right away rather than waiting
+/// for an `UpdateState::Confirmed` frame, which an over-eager rollback
+/// might never send.
+async fn mark_assignments_for_version(
+    pool: &PgPool,
+    agent_id: Uuid,
+    agent_version: &str,
+) -> sqlx::Result<()> {
+    if agent_version.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"UPDATE update_assignments AS a
+              SET state = 'succeeded',
+                  last_status_message = 'agent registered with target version',
+                  updated_at = NOW()
+              FROM update_rollouts r
+              WHERE a.rollout_id = r.id
+                AND a.agent_id = $1
+                AND r.version = $2
+                AND a.state IN ('pending', 'sent')
+                AND r.state IN ('pending', 'active', 'paused')"#,
+    )
+    .bind(agent_id)
+    .bind(agent_version)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
