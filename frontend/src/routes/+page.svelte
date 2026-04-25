@@ -1,11 +1,14 @@
 <!--
-  Server list dashboard.
+  Server list dashboard. Read-only by design: all admin actions
+  (add / rename / delete) live on /settings/servers so a stray click
+  here can't damage the fleet inventory.
 
   - Loads all servers via `GET /api/servers` on mount.
   - Subscribes to `/ws/live` and folds updates into per-server ring buffers
     so each card's sparkline reflects the last 60s of history.
   - Search filters by display name, group, or tag (case-insensitive).
-  - Cards group under their SectionHeader; ungrouped lands in "unassigned".
+  - View mode (cards | list) is persisted in localStorage so the same
+    operator gets their preferred density on every visit.
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
@@ -20,16 +23,16 @@
   } from '$lib/primitives';
   import { goto } from '$app/navigation';
   import {
-    adminCreateServer,
-    deleteServer,
     listServers,
     subscribeLive,
-    type CreatedServer,
     type LiveUpdate,
     type ServerRow
   } from '$lib/api';
   import { authStore } from '$lib/auth.svelte';
   import { ageFromIso, bitsPerSec, percent, usagePct } from '$lib/format';
+
+  type ViewMode = 'cards' | 'list';
+  const VIEW_KEY = 'server-monitor.overview.view';
 
   // ----------------------------------------------------------------
   // state
@@ -53,18 +56,12 @@
   let liveUnsub: (() => void) | null = null;
   let agePoll: ReturnType<typeof setInterval> | null = null;
 
-  // Drives the "Add server" modal + the install-command reveal.
-  let showAddServer = $state(false);
-  let newServerName = $state('');
-  let creating = $state(false);
-  let createError = $state<string | null>(null);
-  let lastCreated = $state<CreatedServer | null>(null);
+  let viewMode = $state<ViewMode>('cards');
 
   // Auth-derived view mode: when there is no logged-in user we ask the panel
   // to filter for guests. The panel responds with hardware nulled out and
   // hidden_from_guest rows dropped.
   const guestMode = $derived(!authStore.state.user);
-  const isAdmin = $derived(authStore.state.user?.role === 'admin');
 
   // ----------------------------------------------------------------
   // data load + live merge
@@ -146,10 +143,19 @@
   }
 
   onMount(() => {
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem(VIEW_KEY);
+      if (saved === 'cards' || saved === 'list') viewMode = saved;
+    }
     reload();
     liveUnsub = subscribeLive(handleLive, { guest: guestMode });
     agePoll = setInterval(() => (nowTick = Date.now()), 1000);
   });
+
+  function setView(v: ViewMode) {
+    viewMode = v;
+    if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, v);
+  }
 
   onDestroy(() => {
     liveUnsub?.();
@@ -164,35 +170,6 @@
     liveUnsub = subscribeLive(handleLive, { guest: guestMode });
     reload();
   });
-
-  async function handleCreate() {
-    createError = null;
-    if (!newServerName.trim()) {
-      createError = 'name required';
-      return;
-    }
-    creating = true;
-    try {
-      const created = await adminCreateServer({ display_name: newServerName.trim() });
-      lastCreated = created;
-      newServerName = '';
-      await reload();
-    } catch (err) {
-      createError = err instanceof Error ? err.message : String(err);
-    } finally {
-      creating = false;
-    }
-  }
-
-  async function handleDelete(id: number, name: string) {
-    if (!confirm(`Remove "${name}" from the panel? This does not stop the agent.`)) return;
-    try {
-      await deleteServer(id);
-      await reload();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : String(err));
-    }
-  }
 
   // ----------------------------------------------------------------
   // grouping + filtering
@@ -274,19 +251,13 @@
         {#each (s.tags ?? []).slice(0, 2) as tag}
           <Badge tone="neutral">{tag}</Badge>
         {/each}
-        {#if isAdmin}
-          <button
-            type="button"
-            onclick={(ev) => {
-              ev.preventDefault();
-              ev.stopPropagation();
-              handleDelete(s.id, s.display_name);
-            }}
-            class="ml-1 font-mono text-2xs uppercase tracking-[0.12em] text-fg-quaternary hover:text-error"
-            title="remove from panel"
+        {#if s.agent_version}
+          <span
+            class="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-tertiary"
+            title="agent version"
           >
-            ✕
-          </button>
+            {s.agent_version}
+          </span>
         {/if}
       </div>
     </div>
@@ -357,20 +328,22 @@
           <span class="text-fg-quaternary">/</span>
           {totals.total} online
         </span>
-        {#if isAdmin}
+        <div class="flex gap-0.5 self-start rounded border border-border bg-elev-1 p-0.5">
           <button
             type="button"
-            onclick={() => {
-              showAddServer = true;
-              lastCreated = null;
-            }}
-            class="rounded border px-3 py-1 font-mono text-2xs uppercase tracking-[0.14em] transition-colors hover:bg-elev-2"
-            style:border-color="var(--border-accent)"
-            style:color="var(--border-accent)"
-          >
-            + add server
-          </button>
-        {/if}
+            onclick={() => setView('cards')}
+            class="rounded-xs px-2 py-1 font-mono text-2xs uppercase tracking-[0.12em] transition-colors duration-100
+                   {viewMode === 'cards' ? 'bg-elev-2 text-fg' : 'text-fg-tertiary hover:text-fg-secondary'}"
+            title="card view"
+          >cards</button>
+          <button
+            type="button"
+            onclick={() => setView('list')}
+            class="rounded-xs px-2 py-1 font-mono text-2xs uppercase tracking-[0.12em] transition-colors duration-100
+                   {viewMode === 'list' ? 'bg-elev-2 text-fg' : 'text-fg-tertiary hover:text-fg-secondary'}"
+            title="list view"
+          >list</button>
+        </div>
       </div>
     </div>
   </div>
@@ -407,7 +380,7 @@
       <div class="py-20 text-center font-mono text-xs text-fg-tertiary">loading…</div>
     {:else if !servers.length}
       {@render emptyState()}
-    {:else}
+    {:else if viewMode === 'cards'}
       {#each groups as [groupName, rows] (groupName)}
         <section class="mb-8 last:mb-0">
           <SectionHeader label={groupName || 'unassigned'} count={rows.length} />
@@ -418,98 +391,63 @@
           </div>
         </section>
       {/each}
+    {:else}
+      <!-- list view: one row per server, dense and sortable-by-eye -->
+      {#each groups as [groupName, rows] (groupName)}
+        <section class="mb-6 last:mb-0">
+          <SectionHeader label={groupName || 'unassigned'} count={rows.length} />
+          <div class="mt-2 overflow-hidden rounded border border-border">
+            <table class="w-full font-mono text-xs">
+              <thead class="bg-elev-1 text-2xs uppercase tracking-[0.14em] text-fg-quaternary">
+                <tr>
+                  <th class="px-3 py-2 text-left">name</th>
+                  <th class="px-3 py-2 text-left">os</th>
+                  <th class="px-3 py-2 text-left">agent</th>
+                  <th class="px-3 py-2 text-right">cpu</th>
+                  <th class="px-3 py-2 text-right">mem</th>
+                  <th class="px-3 py-2 text-right">load</th>
+                  <th class="px-3 py-2 text-right">net in / out</th>
+                  <th class="px-3 py-2 text-left">last seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each rows as s (s.id)}
+                  {@const memPct = s.latest ? usagePct(s.latest.mem_used, s.latest.mem_total) : 0}
+                  <tr class="border-t border-border hover:bg-elev-1/40">
+                    <td class="px-3 py-2">
+                      <a href={`/servers/${s.id}`} class="flex items-center gap-2 text-fg hover:underline">
+                        <StatusDot kind={s.online ? 'online' : 'error'} size={6} />
+                        <span class="truncate">{s.display_name}</span>
+                      </a>
+                    </td>
+                    <td class="px-3 py-2 text-fg-tertiary">
+                      {s.hardware?.os ?? '—'}{s.hardware?.arch ? ' · ' + s.hardware.arch : ''}
+                    </td>
+                    <td class="px-3 py-2 text-fg-tertiary">{s.agent_version ?? '—'}</td>
+                    <td class="px-3 py-2 text-right text-fg">
+                      {s.latest ? percent(s.latest.cpu_pct) + '%' : '—'}
+                    </td>
+                    <td class="px-3 py-2 text-right text-fg">
+                      {s.latest ? percent(memPct, 0) + '%' : '—'}
+                    </td>
+                    <td class="px-3 py-2 text-right text-fg-secondary">
+                      {s.latest ? s.latest.load_1.toFixed(2) : '—'}
+                    </td>
+                    <td class="px-3 py-2 text-right text-fg-tertiary">
+                      {s.latest ? bitsPerSec(s.latest.net_in_bps) : '—'}
+                      <span class="text-fg-quaternary"> · </span>
+                      {s.latest ? bitsPerSec(s.latest.net_out_bps) : '—'}
+                    </td>
+                    <td class="px-3 py-2 text-fg-tertiary">{ageFromIso(s.last_seen_at, nowTick)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      {/each}
     {/if}
   </main>
   {/if}
 
-  {#if showAddServer}
-    <!-- Admin "add server" modal — surfaces the install command on success. -->
-    <button
-      type="button"
-      onclick={() => (showAddServer = false)}
-      class="fixed inset-0 z-40 cursor-default bg-black/60"
-      aria-label="close"
-    ></button>
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Add server"
-      class="fixed left-1/2 top-1/2 z-50 w-[460px] -translate-x-1/2 -translate-y-1/2 rounded border border-border bg-elev-1 p-6"
-    >
-      {#if lastCreated}
-        <div class="mb-3 font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
-          install command — copy it onto the host
-        </div>
-        <pre
-          class="mb-4 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded border border-border bg-recess p-3 font-mono text-xs text-fg"
-        >{lastCreated.install_command}</pre>
-        <div class="flex justify-end gap-2">
-          <button
-            type="button"
-            onclick={() => navigator.clipboard.writeText(lastCreated!.install_command)}
-            class="rounded border border-border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-fg-secondary hover:bg-elev-2"
-          >
-            copy
-          </button>
-          <button
-            type="button"
-            onclick={() => {
-              showAddServer = false;
-              lastCreated = null;
-            }}
-            class="rounded border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.14em]"
-            style:border-color="var(--border-accent)"
-            style:color="var(--border-accent)"
-          >
-            done
-          </button>
-        </div>
-      {:else}
-        <div class="mb-1 font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
-          new server
-        </div>
-        <h2 class="mb-4 text-md font-medium text-fg">Register a host</h2>
-        <label class="block">
-          <span
-            class="mb-1.5 block font-mono text-2xs uppercase tracking-[0.12em] text-fg-tertiary"
-            >display name</span
-          >
-          <input
-            type="text"
-            bind:value={newServerName}
-            disabled={creating}
-            class="block w-full rounded border border-border bg-recess px-3 py-2 font-mono text-sm text-fg focus:border-border-accent"
-            placeholder="prod-web-01"
-          />
-        </label>
-        {#if createError}
-          <div
-            class="mt-3 rounded border border-border bg-recess px-3 py-2 font-mono text-xs"
-            style="color: var(--status-error)"
-          >
-            {createError}
-          </div>
-        {/if}
-        <div class="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onclick={() => (showAddServer = false)}
-            class="rounded border border-border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-fg-secondary hover:bg-elev-2"
-          >
-            cancel
-          </button>
-          <button
-            type="button"
-            disabled={creating || !newServerName.trim()}
-            onclick={handleCreate}
-            class="rounded border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.14em] disabled:opacity-40"
-            style:border-color="var(--border-accent)"
-            style:color="var(--border-accent)"
-          >
-            {creating ? 'creating…' : 'create'}
-          </button>
-        </div>
-      {/if}
-    </div>
-  {/if}
 </div>

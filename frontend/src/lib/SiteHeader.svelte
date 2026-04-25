@@ -13,6 +13,7 @@
     { href: '/', label: 'Servers', visibility: 'public' },
     { href: '/probes', label: 'Probes', visibility: 'auth' },
     { href: '/settings/general', label: 'General', visibility: 'admin' },
+    { href: '/settings/servers', label: 'Manage', visibility: 'admin' },
     { href: '/settings/groups', label: 'Groups', visibility: 'admin' },
     { href: '/settings/users', label: 'Users', visibility: 'admin' },
     { href: '/settings/security', label: 'Security', visibility: 'auth' },
