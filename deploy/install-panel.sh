@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Interactive installer for the server-monitor-rs panel.
+# Installer for the server-monitor-rs panel.
+#
+# Modes:
+#   - Interactive (default, run from a tty): prompts for each value.
+#   - Non-interactive: pass all required values via flags + --non-interactive.
+#                      Intended for Ansible / CI / automated provisioning.
 #
 # Produces (in ./server-monitor-rs/ by default):
 #   - docker-compose.yml   (copied from deploy/docker/)
@@ -39,8 +44,84 @@ random_hex() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# Defaults / flags
+# -----------------------------------------------------------------------------
+NON_INTERACTIVE=0
+SKIP_START=0
+TARGET_DIR=""
+DOMAIN=""
+USE_CADDY="ask"            # ask | yes | no
+POSTGRES_USER="monitor"
+POSTGRES_DB="monitor"
+POSTGRES_PASSWORD=""
+JWT_SECRET=""
+
+usage() {
+    cat <<USAGE
+server-monitor-rs panel installer
+
+Common flags (any of these implies a partial answer; fill the rest interactively):
+  --target-dir=DIR         Where to write docker-compose.yml + .env (default: ./server-monitor-rs)
+  --domain=NAME            Public hostname for Caddy (omit + --no-caddy for plain HTTP)
+  --no-caddy               Skip Caddy entirely (panel exposed on :8080 directly)
+  --with-caddy             Force Caddy on (no prompt)
+  --postgres-user=NAME     Default: monitor
+  --postgres-db=NAME       Default: monitor
+  --postgres-password=PW   If omitted in non-interactive mode, a random 24-byte hex is generated.
+  --jwt-secret=HEX         If omitted, a random 32-byte hex is generated.
+  --non-interactive        Never prompt; missing values either get defaults or fail.
+  --skip-start             Don't run \`docker compose up -d\` after writing files.
+  -h | --help              Show this message.
+
+Examples:
+  # Interactive walkthrough (legacy default):
+  sudo ./install-panel.sh
+
+  # Unattended Caddy install:
+  sudo ./install-panel.sh --non-interactive --with-caddy --domain=panel.example.com
+
+  # Plain-HTTP test rig:
+  sudo ./install-panel.sh --non-interactive --no-caddy --target-dir=/opt/panel
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    arg=$1
+    case "$arg" in
+        --target-dir=*)         TARGET_DIR="${arg#*=}" ;;
+        --target-dir)           TARGET_DIR="$2"; shift ;;
+        --domain=*)             DOMAIN="${arg#*=}"; USE_CADDY="yes" ;;
+        --domain)               DOMAIN="$2"; USE_CADDY="yes"; shift ;;
+        --no-caddy)             USE_CADDY="no" ;;
+        --with-caddy)           USE_CADDY="yes" ;;
+        --postgres-user=*)      POSTGRES_USER="${arg#*=}" ;;
+        --postgres-user)        POSTGRES_USER="$2"; shift ;;
+        --postgres-db=*)        POSTGRES_DB="${arg#*=}" ;;
+        --postgres-db)          POSTGRES_DB="$2"; shift ;;
+        --postgres-password=*)  POSTGRES_PASSWORD="${arg#*=}" ;;
+        --postgres-password)    POSTGRES_PASSWORD="$2"; shift ;;
+        --jwt-secret=*)         JWT_SECRET="${arg#*=}" ;;
+        --jwt-secret)           JWT_SECRET="$2"; shift ;;
+        --non-interactive)      NON_INTERACTIVE=1 ;;
+        --skip-start)           SKIP_START=1 ;;
+        -h|--help)              usage; exit 0 ;;
+        *)                      fatal "unknown argument: $arg (try --help)" ;;
+    esac
+    shift
+done
+
+is_tty() { [[ -t 0 ]]; }
+
 prompt() {
     local varname=$1 message=$2 default=${3:-}
+    if [[ $NON_INTERACTIVE -eq 1 ]] || ! is_tty; then
+        if [[ -z $default ]]; then
+            fatal "missing required value: $message (running non-interactively)"
+        fi
+        printf -v "$varname" '%s' "$default"
+        return
+    fi
     local answer
     if [[ -n $default ]]; then
         printf '%s [%s]: ' "$message" "$default"
@@ -57,6 +138,10 @@ prompt() {
 
 prompt_yes_no() {
     local varname=$1 message=$2 default=${3:-n}
+    if [[ $NON_INTERACTIVE -eq 1 ]] || ! is_tty; then
+        printf -v "$varname" '%s' "$([[ $default = y ]] && echo yes || echo no)"
+        return
+    fi
     local answer
     printf '%s [%s/%s]: ' \
         "$message" \
@@ -82,32 +167,48 @@ if [[ ! -f $COMPOSE_SRC ]]; then
 fi
 
 # --- 2. Choose install dir ---------------------------------------------------
-prompt TARGET_DIR "Install directory" "$PWD/server-monitor-rs"
+if [[ -z $TARGET_DIR ]]; then
+    prompt TARGET_DIR "Install directory" "$PWD/server-monitor-rs"
+fi
 mkdir -p "$TARGET_DIR"
 cd "$TARGET_DIR"
 
 # --- 3. Collect config -------------------------------------------------------
-prompt_yes_no USE_CADDY "Enable Caddy for automatic HTTPS + reverse proxy?" y
+if [[ $USE_CADDY = "ask" ]]; then
+    prompt_yes_no USE_CADDY "Enable Caddy for automatic HTTPS + reverse proxy?" y
+fi
 
-DOMAIN=""
-if [[ $USE_CADDY = yes ]]; then
+if [[ $USE_CADDY = yes && -z $DOMAIN ]]; then
     prompt DOMAIN "Public domain name (e.g. panel.example.com)"
     [[ -z $DOMAIN ]] && fatal "domain cannot be empty when Caddy is enabled"
 fi
 
-prompt POSTGRES_USER "Postgres username" "monitor"
-prompt POSTGRES_DB   "Postgres database" "monitor"
-prompt_yes_no GEN_DB_PASSWORD "Generate a random Postgres password?" y
-if [[ $GEN_DB_PASSWORD = yes ]]; then
-    POSTGRES_PASSWORD=$(random_hex 24)
-    info "generated Postgres password"
-else
-    prompt POSTGRES_PASSWORD "Postgres password" ""
-    [[ -z $POSTGRES_PASSWORD ]] && fatal "password cannot be empty"
+if [[ -z ${POSTGRES_USER:-} ]]; then
+    prompt POSTGRES_USER "Postgres username" "monitor"
+fi
+if [[ -z ${POSTGRES_DB:-} ]]; then
+    prompt POSTGRES_DB   "Postgres database" "monitor"
+fi
+if [[ -z $POSTGRES_PASSWORD ]]; then
+    if [[ $NON_INTERACTIVE -eq 1 ]] || ! is_tty; then
+        POSTGRES_PASSWORD=$(random_hex 24)
+        info "generated Postgres password"
+    else
+        prompt_yes_no GEN_DB_PASSWORD "Generate a random Postgres password?" y
+        if [[ $GEN_DB_PASSWORD = yes ]]; then
+            POSTGRES_PASSWORD=$(random_hex 24)
+            info "generated Postgres password"
+        else
+            prompt POSTGRES_PASSWORD "Postgres password" ""
+            [[ -z $POSTGRES_PASSWORD ]] && fatal "password cannot be empty"
+        fi
+    fi
 fi
 
-JWT_SECRET=$(random_hex 32)
-info "generated JWT secret (32 bytes)"
+if [[ -z $JWT_SECRET ]]; then
+    JWT_SECRET=$(random_hex 32)
+    info "generated JWT secret (32 bytes)"
+fi
 
 # HTTP bind: loopback when Caddy is in front, otherwise 0.0.0.0 so the panel
 # is directly reachable on :8080.
@@ -150,11 +251,15 @@ if [[ $USE_CADDY = yes ]]; then
 fi
 
 # --- 5. Bring up the stack ---------------------------------------------------
-info "starting containers"
-if [[ $USE_CADDY = yes ]]; then
-    docker compose --profile caddy up -d
+if [[ $SKIP_START -eq 1 ]]; then
+    info "skipping \`docker compose up -d\` (--skip-start)"
 else
-    docker compose up -d
+    info "starting containers"
+    if [[ $USE_CADDY = yes ]]; then
+        docker compose --profile caddy up -d
+    else
+        docker compose up -d
+    fi
 fi
 
 # --- 6. Tell the user what to do next ----------------------------------------

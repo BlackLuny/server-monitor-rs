@@ -9,7 +9,7 @@
 #   docker build -f deploy/docker/Dockerfile.panel -t monitor-panel:dev .
 # ----------------------------------------------------------------------------
 
-ARG RUST_VERSION=1.82
+ARG RUST_VERSION=1.92
 ARG NODE_VERSION=22
 
 # ---- frontend: pnpm build ----------------------------------------------------

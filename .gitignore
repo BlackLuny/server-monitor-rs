@@ -3,6 +3,9 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# xtask packager output (M6) — regenerable from source, can be large.
+/dist
+
 # Environments / secrets
 .env
 .env.local
