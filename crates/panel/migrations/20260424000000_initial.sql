@@ -31,7 +31,11 @@ INSERT INTO settings (key, value) VALUES
     ('site_name',              '"server-monitor"'::jsonb),
     ('guest_enabled',           'true'::jsonb),
     ('agent_endpoint',          '""'::jsonb),
-    ('ssh_recording_enabled',   'false'::jsonb)
+    -- SSH session recording is on by default. Operators who'd rather not
+    -- keep per-session .cast files on the agent's disk can flip this in
+    -- /settings/general, or override per server via the ssh_recording
+    -- column.
+    ('ssh_recording_enabled',   'true'::jsonb)
 ON CONFLICT (key) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
