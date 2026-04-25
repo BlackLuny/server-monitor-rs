@@ -39,6 +39,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
+    "asciinema-player": "^3.15.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "tailwind-merge": "^2.6.0",

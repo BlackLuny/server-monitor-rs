@@ -15,6 +15,7 @@
     type ServerRow,
     type TerminalSessionRow
   } from '$lib/api';
+  import RecordingPlayer from '$lib/RecordingPlayer.svelte';
   import Terminal from '$lib/Terminal.svelte';
 
   let server = $state<ServerRow | null>(null);
@@ -22,6 +23,7 @@
   let error = $state<string | null>(null);
   let sessions = $state<TerminalSessionRow[]>([]);
   let sessionsLoading = $state(false);
+  let playing = $state<TerminalSessionRow | null>(null);
 
   const serverId = $derived(Number(page.params.id));
 
@@ -147,12 +149,20 @@
                     <td class="px-3 py-2 text-fg-tertiary">{fmtBytes(s.recording_size)}</td>
                     <td class="px-3 py-2 text-right">
                       {#if s.recording_path}
+                        <button
+                          type="button"
+                          onclick={() => (playing = s)}
+                          class="mr-3 text-accent hover:underline"
+                        >
+                          replay
+                        </button>
                         <a
                           href={recordingDownloadUrl(s.id)}
                           download={`${s.id}.cast`}
-                          class="text-accent hover:underline"
+                          class="text-fg-tertiary hover:text-fg"
+                          title="download the raw .cast file"
                         >
-                          download .cast
+                          .cast
                         </a>
                       {:else}
                         <span class="text-fg-quaternary">—</span>
@@ -166,9 +176,50 @@
         {/if}
 
         <p class="mt-3 font-mono text-2xs uppercase tracking-wider text-fg-quaternary">
-          playback locally with <code class="text-fg-tertiary">asciinema play file.cast</code>
+          click <span class="text-accent">replay</span> for in-browser playback ·
+          <span class="text-fg-tertiary">.cast</span> for offline use with
+          <code class="text-fg-tertiary">asciinema play</code>
         </p>
       </section>
     {/if}
   </main>
+
+  {#if playing}
+    <button
+      type="button"
+      onclick={() => (playing = null)}
+      class="fixed inset-0 z-40 cursor-default bg-black/70"
+      aria-label="close"
+    ></button>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Replay terminal session"
+      class="fixed left-1/2 top-1/2 z-50 max-h-[92vh] w-[min(1100px,92vw)] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded border border-border bg-elev-1 p-5"
+    >
+      <div class="mb-3 flex items-baseline justify-between gap-3">
+        <div>
+          <div class="font-mono text-2xs uppercase tracking-[0.16em] text-fg-quaternary">
+            replay
+          </div>
+          <h2 class="mt-1 font-mono text-sm text-fg">
+            {fmtTs(playing.opened_at)}
+            <span class="text-fg-quaternary">·</span>
+            {playing.username ?? '—'}
+            <span class="text-fg-quaternary">·</span>
+            {fmtBytes(playing.recording_size)}
+          </h2>
+        </div>
+        <button
+          type="button"
+          onclick={() => (playing = null)}
+          class="rounded border border-border px-2.5 py-1 font-mono text-2xs uppercase tracking-[0.14em] text-fg-secondary hover:bg-elev-2"
+        >close</button>
+      </div>
+      <RecordingPlayer sessionId={playing.id} />
+      <p class="mt-2 font-mono text-2xs text-fg-quaternary">
+        space to play/pause · ←/→ skip · 0–9 jump to deciles · &gt; speed up · &lt; slow down
+      </p>
+    </div>
+  {/if}
 </div>
