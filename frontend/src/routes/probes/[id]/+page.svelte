@@ -145,33 +145,122 @@
   // misleadingly across.
   const chartData = $derived.by(() => {
     if (!series || !series.points.length) return null;
-    const byAgent = new Map<string, Map<number, number | null>>();
+    const byAgentLatency = new Map<string, Map<number, number | null>>();
+    const byAgentLoss = new Map<string, Map<number, number | null>>();
     const allTs = new Set<number>();
     for (const p of series.points) {
       const epoch = Math.floor(new Date(p.ts).getTime() / 1000);
       allTs.add(epoch);
-      let m = byAgent.get(p.agent_id);
-      if (!m) {
-        m = new Map();
-        byAgent.set(p.agent_id, m);
+
+      let lat = byAgentLatency.get(p.agent_id);
+      if (!lat) {
+        lat = new Map();
+        byAgentLatency.set(p.agent_id, lat);
       }
-      m.set(epoch, p.ok ? p.latency_us / 1000 : null);
+      lat.set(epoch, p.ok ? p.latency_us / 1000 : null);
+
+      // Loss rate: prefer the rolled-up success_rate (m1/m5/h1 buckets carry
+      // a real fraction); fall back to the boolean for raw granularity so a
+      // failure shows as a 100% spike.
+      let loss = byAgentLoss.get(p.agent_id);
+      if (!loss) {
+        loss = new Map();
+        byAgentLoss.set(p.agent_id, loss);
+      }
+      const lossPct =
+        p.success_rate !== null && p.success_rate !== undefined
+          ? Math.max(0, Math.min(100, (1 - p.success_rate) * 100))
+          : p.ok
+          ? 0
+          : 100;
+      loss.set(epoch, lossPct);
     }
     const timestamps = Array.from(allTs).sort((a, b) => a - b);
-    const ids = Array.from(byAgent.keys()).sort();
+    const ids = Array.from(byAgentLatency.keys()).sort();
     if (!ids.length) return null;
-    const seriesArr = ids.map((aid, idx) => ({
+    const latencySeries = ids.map((aid, idx) => ({
       name: agentName(aid),
       color: PALETTE[idx % PALETTE.length],
-      values: timestamps.map((t) => byAgent.get(aid)!.get(t) ?? null) as (number | null)[],
+      values: timestamps.map((t) => byAgentLatency.get(aid)!.get(t) ?? null) as (
+        | number
+        | null
+      )[],
       unit: 'ms'
     }));
-    return { timestamps, series: seriesArr };
+    const lossSeries = ids.map((aid, idx) => ({
+      name: agentName(aid),
+      color: PALETTE[idx % PALETTE.length],
+      values: timestamps.map((t) => byAgentLoss.get(aid)!.get(t) ?? null) as (
+        | number
+        | null
+      )[],
+      unit: '%'
+    }));
+    return { timestamps, latencySeries, lossSeries };
+  });
+
+  // Per-agent summary across the current window — total samples, loss
+  // rate, mean / p50 / p95 latency. Computed client-side from the same
+  // points the chart uses so the numbers can't drift from the curves.
+  interface AgentSummary {
+    agent_id: string;
+    samples: number;
+    failures: number;
+    loss_pct: number;
+    mean_ms: number | null;
+    p50_ms: number | null;
+    p95_ms: number | null;
+  }
+
+  const summary = $derived.by<AgentSummary[]>(() => {
+    if (!series || !series.points.length) return [];
+    const groups = new Map<string, { ok_lat_us: number[]; failures: number; total: number }>();
+    for (const p of series.points) {
+      let g = groups.get(p.agent_id);
+      if (!g) {
+        g = { ok_lat_us: [], failures: 0, total: 0 };
+        groups.set(p.agent_id, g);
+      }
+      g.total += 1;
+      if (p.ok) {
+        g.ok_lat_us.push(p.latency_us);
+      } else {
+        g.failures += 1;
+      }
+    }
+    const out: AgentSummary[] = [];
+    for (const [agent_id, g] of groups) {
+      const sorted = g.ok_lat_us.slice().sort((a, b) => a - b);
+      const mean_ms = sorted.length
+        ? sorted.reduce((a, b) => a + b, 0) / sorted.length / 1000
+        : null;
+      const p50_ms = sorted.length ? sorted[Math.floor(sorted.length * 0.5)] / 1000 : null;
+      const p95_ms = sorted.length
+        ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] / 1000
+        : null;
+      out.push({
+        agent_id,
+        samples: g.total,
+        failures: g.failures,
+        loss_pct: g.total > 0 ? (g.failures / g.total) * 100 : 0,
+        mean_ms,
+        p50_ms,
+        p95_ms
+      });
+    }
+    out.sort((a, b) => agentName(a.agent_id).localeCompare(agentName(b.agent_id)));
+    return out;
   });
 
   function agentName(id: string): string {
     const a = agents.find((r) => r.agent_id === id);
     return a ? a.display_name : id.slice(0, 8);
+  }
+
+  function fmtMs(v: number | null): string {
+    if (v == null) return '—';
+    if (v < 1) return `${(v * 1000).toFixed(0)}µs`;
+    return `${v.toFixed(1)}ms`;
   }
 </script>
 
@@ -233,45 +322,81 @@
       </div>
     {/if}
 
-    <!-- Chart -->
-    <section class="rounded border border-border bg-elev-1 p-4">
-      <div class="mb-3 flex items-center justify-between gap-3">
-        <div class="font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
-          latency · last {range}
-        </div>
-        <div class="flex items-center gap-2">
-          <select
-            bind:value={agentFilter}
-            class="rounded border border-border bg-recess px-2 py-1 font-mono text-2xs text-fg"
+    <!-- Range / agent filter (shared by all charts below) -->
+    <section class="flex items-center justify-end gap-2">
+      <select
+        bind:value={agentFilter}
+        class="rounded border border-border bg-recess px-2 py-1 font-mono text-2xs text-fg"
+      >
+        <option value={undefined}>all agents</option>
+        {#each agents as a}
+          <option value={a.agent_id}>{a.display_name}</option>
+        {/each}
+      </select>
+      <div class="flex gap-1">
+        {#each ranges as r}
+          <button
+            type="button"
+            onclick={() => (range = r)}
+            class="rounded px-2 py-1 font-mono text-2xs uppercase tracking-[0.12em]"
+            class:text-fg={range === r}
+            class:text-fg-tertiary={range !== r}
+            style:background={range === r ? 'var(--bg-elev-2)' : 'transparent'}
           >
-            <option value={undefined}>all agents</option>
-            {#each agents as a}
-              <option value={a.agent_id}>{a.display_name}</option>
-            {/each}
-          </select>
-          <div class="flex gap-1">
-            {#each ranges as r}
-              <button
-                type="button"
-                onclick={() => (range = r)}
-                class="rounded px-2 py-1 font-mono text-2xs uppercase tracking-[0.12em]"
-                class:text-fg={range === r}
-                class:text-fg-tertiary={range !== r}
-                style:background={range === r ? 'var(--bg-elev-2)' : 'transparent'}
-              >
-                {r}
-              </button>
-            {/each}
-          </div>
-        </div>
+            {r}
+          </button>
+        {/each}
       </div>
+    </section>
 
+    <!-- Per-agent summary across the current window -->
+    {#if summary.length}
+      <section class="grid gap-3" style:grid-template-columns="repeat(auto-fit, minmax(220px, 1fr))">
+        {#each summary as s, idx (s.agent_id)}
+          {@const palette = ['var(--data-1)', 'var(--data-2)', 'var(--data-3)', 'var(--data-4)', 'var(--data-5)']}
+          <div class="rounded border border-border bg-elev-1 p-3">
+            <div class="flex items-center gap-2">
+              <span class="inline-block h-2 w-2 rounded-full" style:background={palette[idx % palette.length]}></span>
+              <span class="truncate font-mono text-xs text-fg">{agentName(s.agent_id)}</span>
+            </div>
+            <div class="mt-2 grid grid-cols-2 gap-y-1 font-mono text-2xs text-fg-tertiary">
+              <span>samples</span>
+              <span class="text-right text-fg">{s.samples}</span>
+              <span>loss</span>
+              <span
+                class="text-right"
+                class:text-fg={s.loss_pct === 0}
+                class:text-warning={s.loss_pct > 0 && s.loss_pct < 5}
+                class:text-error={s.loss_pct >= 5}
+              >
+                {s.loss_pct.toFixed(s.loss_pct < 1 ? 2 : 1)}%
+                {#if s.failures > 0}
+                  <span class="text-fg-quaternary">· {s.failures} fail</span>
+                {/if}
+              </span>
+              <span>mean</span>
+              <span class="text-right text-fg">{fmtMs(s.mean_ms)}</span>
+              <span>p50</span>
+              <span class="text-right text-fg-secondary">{fmtMs(s.p50_ms)}</span>
+              <span>p95</span>
+              <span class="text-right text-fg-secondary">{fmtMs(s.p95_ms)}</span>
+            </div>
+          </div>
+        {/each}
+      </section>
+    {/if}
+
+    <!-- Latency chart -->
+    <section class="rounded border border-border bg-elev-1 p-4">
+      <div class="mb-3 font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
+        latency · last {range}
+      </div>
       {#if chartData}
         <TimeSeriesChart
           timestamps={chartData.timestamps}
-          series={chartData.series}
+          series={chartData.latencySeries}
           height={260}
-          formatY={(v) => `${v.toFixed(0)}ms`}
+          formatY={(v) => (v < 1 ? `${(v * 1000).toFixed(0)}µs` : `${v.toFixed(1)}ms`)}
         />
       {:else if loading}
         <div class="py-12 text-center font-mono text-xs text-fg-tertiary">loading…</div>
@@ -281,6 +406,26 @@
         </div>
       {/if}
     </section>
+
+    <!-- Loss-rate chart -->
+    {#if chartData}
+      <section class="rounded border border-border bg-elev-1 p-4">
+        <div class="mb-3 flex items-center justify-between font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
+          <span>loss · last {range}</span>
+          <span class="text-fg-quaternary">
+            {#if range === '1h'}raw — failures spike to 100%{:else}aggregated{/if}
+          </span>
+        </div>
+        <TimeSeriesChart
+          timestamps={chartData.timestamps}
+          series={chartData.lossSeries}
+          height={180}
+          min={0}
+          max={100}
+          formatY={(v) => `${v.toFixed(v < 1 ? 2 : 0)}%`}
+        />
+      </section>
+    {/if}
 
     <!-- Per-agent matrix -->
     <section class="rounded border border-border bg-elev-1 p-4">

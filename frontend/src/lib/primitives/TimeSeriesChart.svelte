@@ -51,6 +51,16 @@
     };
   }
 
+  function fmtCell(v: unknown, unit: string | undefined): string {
+    if (v == null || typeof v !== 'number' || !Number.isFinite(v)) return '—';
+    const body = formatY(v);
+    // Avoid double-suffixing: if formatY already includes the unit (e.g.
+    // "92%"), don't tack on another. We accept some minor false-positives
+    // here — the worst case is a missing unit, not a wrong one.
+    if (!unit) return body;
+    return body.endsWith(unit) ? body : `${body}${unit}`;
+  }
+
   function buildOpts(width: number): uPlot.Options {
     const { grid, fg } = axisColors();
     return {
@@ -58,7 +68,11 @@
       height,
       pxAlign: 0,
       cursor: { y: false, points: { show: true, size: 6 } },
-      legend: { show: false },
+      // uPlot's built-in legend doubles as a hover tooltip: hovering the
+      // chart updates each series cell with the value at the cursor's
+      // timestamp. This is exactly what we want — no separate tooltip
+      // overlay to maintain.
+      legend: { show: true, live: true },
       axes: [
         {
           stroke: fg,
@@ -86,7 +100,8 @@
           stroke: s.color,
           width: 1.25,
           fill: `color-mix(in oklch, ${s.color} 12%, transparent)`,
-          points: { show: false }
+          points: { show: false },
+          value: (_u: uPlot, v: number | null) => fmtCell(v, s.unit)
         }))
       ]
     };
@@ -132,4 +147,40 @@
   });
 </script>
 
-<div bind:this={container} class="w-full" style:height="{height}px"></div>
+<div bind:this={container} class="time-series-chart w-full" style:height="{height}px"></div>
+
+<style>
+  /* Scoped uPlot legend styling so the live hover-readout matches the
+     dashboard's monospace + hairline aesthetic instead of falling back to
+     uPlot's default browser table. */
+  :global(.time-series-chart + .u-legend),
+  :global(.time-series-chart .u-legend) {
+    color: var(--fg-tertiary);
+    font-family: 'JetBrains Mono Variable', monospace;
+    font-size: 11px;
+    padding-top: 6px;
+  }
+  :global(.time-series-chart .u-legend .u-marker) {
+    border-radius: 2px;
+  }
+  :global(.time-series-chart .u-legend .u-label) {
+    color: var(--fg-secondary);
+    margin-left: 4px;
+    margin-right: 4px;
+  }
+  :global(.time-series-chart .u-legend .u-value) {
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  :global(.time-series-chart .u-legend th) {
+    color: var(--fg-quaternary);
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  :global(.time-series-chart .u-inline) {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+</style>
