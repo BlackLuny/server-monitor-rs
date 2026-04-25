@@ -367,7 +367,7 @@ UNIT
 }
 
 write_launchd_plist() {
-    local plist="/Library/LaunchDaemons/com.lunyxiaoluny.${SERVICE_NAME}.plist"
+    local plist="/Library/LaunchDaemons/com.blackluny.${SERVICE_NAME}.plist"
     info "writing $plist"
     if [[ $DRY_RUN -eq 1 ]]; then
         echo "+ cat > $plist"
@@ -379,7 +379,7 @@ write_launchd_plist() {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.lunyxiaoluny.${SERVICE_NAME}</string>
+    <string>com.blackluny.${SERVICE_NAME}</string>
     <key>ProgramArguments</key>
     <array>
         <string>${INSTALL_DIR}/monitor-agent</string>
@@ -422,7 +422,7 @@ else
             ;;
         launchd)
             write_launchd_plist
-            run launchctl load "/Library/LaunchDaemons/com.lunyxiaoluny.${SERVICE_NAME}.plist"
+            run launchctl load "/Library/LaunchDaemons/com.blackluny.${SERVICE_NAME}.plist"
             ;;
         none)
             warn "no supported init system detected — start manually:"

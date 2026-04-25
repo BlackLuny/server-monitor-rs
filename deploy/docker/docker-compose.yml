@@ -26,7 +26,7 @@ services:
       retries: 20
 
   panel:
-    image: ${PANEL_IMAGE:-ghcr.io/lunyxiaoluny/server-monitor-panel:latest}
+    image: ${PANEL_IMAGE:-ghcr.io/BlackLuny/server-monitor-panel:latest}
     restart: unless-stopped
     depends_on:
       db:
@@ -36,7 +36,7 @@ services:
       MONITOR_JWT__SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (>=32 bytes)}
       MONITOR_LOG__FILTER: ${LOG_FILTER:-info}
       MONITOR_LOG__FORMAT: ${LOG_FORMAT:-text}
-      MONITOR_GITHUB__REPO: ${GITHUB_REPO:-lunyxiaoluny/server-monitor-rs}
+      MONITOR_GITHUB__REPO: ${GITHUB_REPO:-BlackLuny/server-monitor-rs}
       MONITOR_GITHUB__TOKEN: ${GITHUB_TOKEN:-}
     ports:
       # HTTP API + UI — keep on loopback when Caddy fronts the deployment; flip

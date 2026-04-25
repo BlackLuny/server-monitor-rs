@@ -24,7 +24,7 @@ Generates a fresh `JWT_SECRET` and Postgres password automatically;
 walks you through Caddy / domain setup.
 
 ```sh
-git clone https://github.com/lunyxiaoluny/server-monitor-rs.git
+git clone https://github.com/BlackLuny/server-monitor-rs.git
 cd server-monitor-rs
 sudo ./deploy/install-panel.sh
 ```

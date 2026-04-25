@@ -229,14 +229,14 @@ POSTGRES_USER=${POSTGRES_USER}
 POSTGRES_DB=${POSTGRES_DB}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 
-PANEL_IMAGE=ghcr.io/lunyxiaoluny/server-monitor-panel:latest
+PANEL_IMAGE=ghcr.io/BlackLuny/server-monitor-panel:latest
 
 JWT_SECRET=${JWT_SECRET}
 
 LOG_FILTER=info,sqlx=warn
 LOG_FORMAT=text
 
-GITHUB_REPO=lunyxiaoluny/server-monitor-rs
+GITHUB_REPO=BlackLuny/server-monitor-rs
 GITHUB_TOKEN=
 
 PANEL_HTTP_BIND=${PANEL_HTTP_BIND}
