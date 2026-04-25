@@ -1,0 +1,281 @@
+name: Release
+
+# Tag-driven release pipeline.
+#
+# Each `vX.Y.Z` tag fans out to three OS runners that build their native
+# (and zig-cross) targets, hand the tarballs back as workflow artifacts,
+# then a final `release` job aggregates everything, computes a single
+# SHA256SUMS, signs every tarball with a Sigstore-keyless build provenance
+# attestation, and creates / updates the GitHub Release.
+#
+# What goes into a Release:
+#   monitor-{panel,agent,supervisor}-<target>.tar.gz   (linux + macos)
+#   monitor-{agent,supervisor}-x86_64-pc-windows-msvc.zip
+#   SHA256SUMS                                         (hex hashes, one per line)
+#   …plus a build-provenance attestation per file (visible on the Release page)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to publish (must already exist as a git tag)"
+        required: true
+        type: string
+
+permissions:
+  contents: write       # create / update releases + upload assets
+  id-token: write       # OIDC for keyless attestations
+  attestations: write   # store the resulting attestations
+
+env:
+  RUST_TOOLCHAIN: "1.92"
+  NODE_VERSION: "22"
+  PNPM_VERSION: "9"
+
+jobs:
+  # -------------------------------------------------------------------
+  # Frontend bundle — built once, shared by every panel build below
+  # via rust-embed at compile time.
+  # -------------------------------------------------------------------
+  frontend:
+    name: Build frontend bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: pnpm install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: pnpm build
+        working-directory: frontend
+        run: pnpm build
+      - name: Upload built frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+          retention-days: 1
+
+  # -------------------------------------------------------------------
+  # Per-OS build matrix.
+  # -------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.label }})
+    needs: frontend
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-latest
+            targets: x86_64-unknown-linux-musl
+            install_zig: true
+            use_cargo: false
+            install_protoc: linux
+          - label: linux-aarch64
+            runner: ubuntu-latest
+            targets: aarch64-unknown-linux-musl
+            install_zig: true
+            use_cargo: false
+            install_protoc: linux
+          - label: macos
+            runner: macos-latest
+            # macos-latest is arm64; zigbuild produces both intel + arm slices.
+            targets: x86_64-apple-darwin aarch64-apple-darwin
+            install_zig: true
+            use_cargo: false
+            install_protoc: macos
+          - label: windows
+            runner: windows-latest
+            targets: x86_64-pc-windows-msvc
+            install_zig: false
+            use_cargo: true
+            install_protoc: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc (linux)
+        if: matrix.install_protoc == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Install protoc (macos)
+        if: matrix.install_protoc == 'macos'
+        run: brew install protobuf
+
+      - name: Install protoc (windows)
+        if: matrix.install_protoc == 'windows'
+        run: choco install protoc -y --no-progress
+
+      - name: Install Rust toolchain + targets
+        run: |
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.RUST_TOOLCHAIN }}
+          for target in ${{ matrix.targets }}; do
+            rustup target add "$target"
+          done
+        shell: bash
+
+      - name: Install zig + cargo-zigbuild
+        if: matrix.install_zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.install_zig
+        run: cargo install cargo-zigbuild --locked --version "^0.19"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.label }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.label }}-
+
+      - name: Download frontend bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags=()
+          if [[ "${{ matrix.use_cargo }}" == "true" ]]; then
+            flags+=(--use-cargo)
+          fi
+          for target in ${{ matrix.targets }}; do
+            flags+=(--target "$target")
+          done
+          flags+=(--skip-frontend --no-checksums)
+          cargo run -p xtask -- package "${flags[@]}"
+
+      - name: List artefacts
+        shell: bash
+        run: ls -la dist/
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.label }}
+          path: dist/*
+          retention-days: 1
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------
+  # Aggregate, attest, publish.
+  # -------------------------------------------------------------------
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all per-OS dists
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-staging
+          pattern: dist-*
+
+      - name: Flatten into dist/
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find dist-staging -type f -name 'monitor-*.tar.gz' -exec cp -v {} dist/ \;
+          find dist-staging -type f -name 'monitor-*.zip'    -exec cp -v {} dist/ \;
+          ls -la dist/
+
+      - name: Compute SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          # `sort` keeps the file deterministic across runs.
+          sha256sum monitor-* | sort -k2 > SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: Generate build-provenance attestations
+        # One attestation per archive — visible on the Release page so
+        # downstream consumers (e.g. install-agent.sh) can verify the
+        # binaries came from this exact workflow run.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/monitor-*.tar.gz
+            dist/monitor-*.zip
+
+      - name: Determine tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF##refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.name }}"
+          notes_file=$(mktemp)
+          cat > "$notes_file" <<NOTES
+          ## $tag
+
+          Cross-platform release of the server-monitor-rs panel + agent.
+
+          ### Targets
+
+          | Target | Panel | Agent | Supervisor |
+          | --- | --- | --- | --- |
+          | x86_64-unknown-linux-musl | ✅ | ✅ | ✅ |
+          | aarch64-unknown-linux-musl | ✅ | ✅ | ✅ |
+          | x86_64-apple-darwin | ✅ | ✅ | ✅ |
+          | aarch64-apple-darwin | ✅ | ✅ | ✅ |
+          | x86_64-pc-windows-msvc | — | ✅ | ✅ |
+
+          ### Verification
+
+          \`\`\`sh
+          sha256sum -c SHA256SUMS
+          gh attestation verify monitor-agent-<target>.tar.gz \\
+              --owner BlackLuny
+          \`\`\`
+
+          The SHA256SUMS file pins every artefact; the build-provenance
+          attestations on this Release prove they came from this exact CI
+          run (Sigstore / GitHub OIDC, no private keys).
+          NOTES
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes_file"
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+                --title "$tag" --notes-file "$notes_file"
+          fi
+
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber dist/*

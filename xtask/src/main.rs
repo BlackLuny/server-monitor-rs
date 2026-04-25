@@ -70,6 +70,15 @@ enum Cmd {
         /// packaged binaries. Useful when iterating on packaging logic.
         #[arg(long)]
         skip_frontend: bool,
+        /// Skip writing a SHA256SUMS file. Release CI aggregates per-runner
+        /// archives into one file in a later job and prefers a single sum.
+        #[arg(long)]
+        no_checksums: bool,
+        /// Use plain `cargo build` instead of `cargo zigbuild`. Useful on a
+        /// runner that already targets its host (e.g. windows-latest building
+        /// `x86_64-pc-windows-msvc`) — saves installing zig there.
+        #[arg(long)]
+        use_cargo: bool,
     },
 }
 
@@ -108,7 +117,16 @@ fn main() -> Result<()> {
             all_targets,
             out_dir,
             skip_frontend,
-        } => package(target, all_targets, &out_dir, skip_frontend),
+            no_checksums,
+            use_cargo,
+        } => package(
+            target,
+            all_targets,
+            &out_dir,
+            skip_frontend,
+            no_checksums,
+            use_cargo,
+        ),
     }
 }
 
@@ -163,7 +181,14 @@ const ALL_TARGETS: &[TargetSpec] = &[
     },
 ];
 
-fn package(targets: Vec<String>, all: bool, out_dir: &Path, skip_frontend: bool) -> Result<()> {
+fn package(
+    targets: Vec<String>,
+    all: bool,
+    out_dir: &Path,
+    skip_frontend: bool,
+    no_checksums: bool,
+    use_cargo: bool,
+) -> Result<()> {
     let selected: Vec<&'static TargetSpec> = if all {
         ALL_TARGETS.iter().collect()
     } else if targets.is_empty() {
@@ -199,20 +224,23 @@ fn package(targets: Vec<String>, all: bool, out_dir: &Path, skip_frontend: bool)
 
     for spec in &selected {
         eprintln!("\n=== packaging {} ===", spec.triple);
-        cross_build(spec)?;
+        cross_build(spec, use_cargo)?;
         archive_target(spec, out_dir)?;
     }
 
-    write_checksums(out_dir)?;
+    if !no_checksums {
+        write_checksums(out_dir)?;
+    }
     eprintln!("\nDone. Artefacts in {}.", out_dir.display());
     Ok(())
 }
 
-fn cross_build(spec: &TargetSpec) -> Result<()> {
-    // cargo-zigbuild handles musl + macOS sysroot quirks for us. For the
-    // host's own target it's still happy to invoke plain rustc, so no
-    // special-case branch needed.
-    let mut args: Vec<&str> = vec!["zigbuild", "--release", "--target", spec.triple];
+fn cross_build(spec: &TargetSpec, use_cargo: bool) -> Result<()> {
+    // `cargo zigbuild` handles musl + macOS sysroot quirks; on a runner that
+    // already targets its host triple natively, plain `cargo build` is
+    // simpler and avoids needing zig in the toolchain.
+    let subcommand = if use_cargo { "build" } else { "zigbuild" };
+    let mut args: Vec<&str> = vec![subcommand, "--release", "--target", spec.triple];
     for bin in spec.bins {
         args.push("-p");
         // every bin is also the package name in this workspace.
