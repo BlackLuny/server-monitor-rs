@@ -159,6 +159,18 @@ impl AgentService for AgentServiceImpl {
         // assignment as soon as the downstream channel is live.
         self.state.assignment_bus.publish();
 
+        // Catch-up dispatch: any rollout assignment that's still `pending`
+        // for this agent gets shipped now that the channel is live.
+        let pool = self.state.pool.clone();
+        let hub = self.state.hub.clone();
+        tokio::spawn(async move {
+            if let Err(err) =
+                crate::updates::dispatch::dispatch_pending_for_agent(&pool, &hub, agent_id).await
+            {
+                tracing::warn!(%err, %agent_id, "post-connect update dispatch failed");
+            }
+        });
+
         // Spawn the inbound loop — it owns the session (so it controls when to
         // drop from the hub). `rx` is returned to tonic to drive downstream.
         tokio::spawn(run_inbound_loop(
@@ -264,6 +276,9 @@ async fn handle_payload(
         }
         AgentPayload::UpdateStatus(status) => {
             ingest_update_status(state, session, status).await;
+        }
+        AgentPayload::RecordingChunk(chunk) => {
+            state.recording_hub.deliver_chunk(chunk);
         }
     }
 }

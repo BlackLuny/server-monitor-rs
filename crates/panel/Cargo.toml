@@ -62,6 +62,7 @@ dashmap = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 # Proto client side is enabled for integration tests that exercise the gRPC server.

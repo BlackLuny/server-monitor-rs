@@ -10,8 +10,9 @@
 //! requiring the full agent-side tokio stack.
 
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
-use monitor_agent_supervisor::staging::{stage, StagingError};
+use monitor_agent_supervisor::staging::{stage, stage_cancellable, StagingError};
 
 #[test]
 fn rejects_non_https() {
@@ -27,6 +28,29 @@ fn rejects_non_https() {
         "00",
     ));
     assert!(matches!(result, Err(StagingError::InsecureUrl(_))));
+}
+
+/// Pre-firing the cancel token short-circuits the download — the function
+/// returns `Cancelled` before opening any network connection. We can verify
+/// that without spinning up a server.
+#[test]
+fn pre_fired_cancel_short_circuits() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let tmp = TempDir::new().unwrap();
+    let (tx, rx) = oneshot::channel();
+    let _ = tx.send(());
+    let result = rt.block_on(stage_cancellable(
+        tmp.path(),
+        "v0.1.0",
+        "https://example.invalid/bad.tar.gz",
+        "00",
+        "",
+        Some(rx),
+    ));
+    assert!(matches!(result, Err(StagingError::Cancelled)));
 }
 
 // The staging path needs a real https server to test the happy path. That

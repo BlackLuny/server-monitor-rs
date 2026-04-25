@@ -486,6 +486,10 @@ export function getLatestRelease(): Promise<LatestRelease | null> {
   return getJson<LatestRelease | null>('/api/updates/latest');
 }
 
+export function listRecentReleases(): Promise<LatestRelease[]> {
+  return getJson<LatestRelease[]>('/api/updates/recent');
+}
+
 export function listRollouts(): Promise<RolloutSummary[]> {
   return getJson<RolloutSummary[]>('/api/updates/rollouts');
 }
@@ -506,6 +510,36 @@ export function resumeRollout(id: number): Promise<void> {
 }
 export function abortRollout(id: number): Promise<void> {
   return postNoContent(`/api/updates/rollouts/${id}/abort`, {});
+}
+
+// ---------------------------------------------------------------------------
+// Terminal sessions + recordings
+// ---------------------------------------------------------------------------
+
+export interface TerminalSessionRow {
+  id: string;
+  server_id: number;
+  user_id: number | null;
+  username: string | null;
+  opened_at: string;
+  closed_at: string | null;
+  exit_code: number | null;
+  error: string | null;
+  recording_path: string | null;
+  recording_size: number | null;
+  recording_sha256: string | null;
+  client_ip: string | null;
+}
+
+export function listTerminalSessions(serverId: number): Promise<TerminalSessionRow[]> {
+  return getJson<TerminalSessionRow[]>(`/api/servers/${serverId}/terminal-sessions`);
+}
+
+/** Build the URL for streaming a recording. The browser's normal cookie
+ *  auth applies; the panel proxies to the agent over the existing gRPC
+ *  channel. */
+export function recordingDownloadUrl(sessionId: string): string {
+  return `/api/recordings/${sessionId}/download`;
 }
 
 // ---------------------------------------------------------------------------

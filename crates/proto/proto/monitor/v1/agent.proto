@@ -66,6 +66,10 @@ message AgentToPanel {
         MetricBatch metrics_batch = 16;
         // Several probe results bundled into one frame.
         ProbeBatch probe_batch = 17;
+        // Streamed chunk of an asciinema .cast recording, in response to
+        // `PanelToAgent.recording_fetch`. The agent splits the file into
+        // sequential 64 KiB chunks and ends the stream with `eof = true`.
+        RecordingFetchChunk recording_chunk = 18;
     }
 }
 
@@ -102,6 +106,9 @@ message PanelToAgent {
         // Incremental update to the probe assignment. Idempotent when the
         // agent already saw the same probe id.
         ProbeAssignmentDelta probe_assignment_delta = 18;
+        // Ask the agent to stream back a previously written .cast file.
+        // The agent replies with one or more `RecordingFetchChunk` frames.
+        RecordingFetchRequest recording_fetch = 19;
     }
 }
 
@@ -287,6 +294,24 @@ message TerminalClosed {
     string recording_path = 4;   // absolute path on the agent's filesystem
     int64  recording_size = 5;   // bytes
     string recording_sha256 = 6; // hex-encoded sha256 of the file contents
+}
+
+// Panel asks the agent for a recording it previously finalised. The agent
+// looks up the file by `session_id` (recordings live under the agent's
+// configured recordings dir as `<session_id>.cast`) and streams it back.
+message RecordingFetchRequest {
+    string session_id = 1;
+}
+
+// One chunk of the streamed file. Frames are emitted in order; `eof = true`
+// marks the final frame (which may also carry the last bytes). On error,
+// the agent emits a single frame with `error` set and `eof = true`.
+message RecordingFetchChunk {
+    string session_id = 1;
+    uint64 offset = 2;
+    bytes  data = 3;
+    bool   eof = 4;
+    string error = 5;
 }
 
 // ----------------------------------------------------------------------------

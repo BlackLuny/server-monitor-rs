@@ -116,17 +116,51 @@ There are two flavours of rollback:
   crash-on-start. No admin action needed.
 - **Manual, fleet-wide.** Tag a previous version (e.g. `v0.2.0`) again
   is _not_ supported — releases are immutable. Instead, create a new
-  rollout pointing at the previous version (`v0.1.0`):
+  rollout pointing at the previous version. The poller caches the most
+  recent ten releases under `settings.recent_releases`, so the version
+  dropdown on `/settings/updates` includes them automatically:
 
-  ```sh
-  # If the panel poller doesn't show the older release as "latest",
-  # update settings.update_repo / update_channel temporarily, or pin
-  # latest by republishing.
-  ```
+  1. On the failed rollout's row click **rollback to vX.Y.Z** — the
+     handler pre-fills the form with the prior tag and a `rollback to vX`
+     note.
+  2. Pick a percent and **Start rollout** as usual.
 
-  In M7.1 we'll add a "rollback" button that picks the last shipped
-  release as the rollout target. Today, set the version manually in
-  the form and start a 100% rollout.
+  Each row in the rollout list also exposes a one-click rollback
+  whenever the rollout is `aborted` or `completed` and the cache holds
+  at least one earlier release. If the version you want isn't in the
+  dropdown (older than ten releases ago), bump
+  `settings.update_repo`/`update_channel` so the poller picks it up, or
+  insert a row by hand.
+
+## 4a. Attestation enforcement (optional)
+
+By default the supervisor enforces only the SHA-256 in `SHA256SUMS` —
+that's enough to defeat tampering on the GitHub asset host but not a
+compromised maintainer account. Hosts that want
+[Sigstore build provenance](https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)
+verified before swap can opt in:
+
+1. **Install GitHub CLI 2.49+ on every supervisor host**
+   (`apt install gh` / `brew install gh`). The supervisor shells out to
+   `gh attestation verify` and fails closed if the binary is missing.
+2. **Flip the panel setting**:
+
+   ```sh
+   curl -fsSL -X PUT https://panel.example/api/settings/attestation_required \
+        -H 'cookie: …admin session…' \
+        -H 'content-type: application/json' \
+        -d 'true'
+   ```
+
+3. From then on, every `UpdateAgent` ships with `attestation_url` set to
+   the configured `update_repo`. The supervisor runs
+   `gh attestation verify <archive> --repo <repo>` after the SHA-256
+   check; a failed attestation is reported back as
+   `UpdateState::Failed` and rolls the assignment to `failed`. No swap
+   happens.
+
+Disabling is symmetric — `PUT /api/settings/attestation_required false`
+returns the fleet to SHA-256-only verification.
 
 ## 5. Operational checklist
 

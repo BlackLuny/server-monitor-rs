@@ -28,6 +28,10 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Cap on SHA256SUMS download size — guards against a hostile / corrupted
 /// release with a giant text file.
 const MAX_SHA256SUMS_BYTES: usize = 64 * 1024;
+/// Max releases to retain in the `recent_releases` cache. The rollback
+/// dropdown shows this many entries; older versions are still installable
+/// by typing the tag manually.
+const RECENT_LIMIT: usize = 10;
 
 /// What we cache in `settings.latest_release`. Stable JSON shape so the
 /// frontend / rollout creator can rely on it.
@@ -89,9 +93,9 @@ pub fn spawn(pool: PgPool, mut shutdown: watch::Receiver<bool>) -> tokio::task::
 
         loop {
             match poll_once(&pool).await {
-                Ok(rel) => tracing::info!(
-                    tag = %rel.tag,
-                    assets = rel.assets.len(),
+                Ok(rels) => tracing::info!(
+                    cached = rels.len(),
+                    latest = rels.first().map(|r| r.tag.as_str()).unwrap_or("<none>"),
                     "release poll succeeded",
                 ),
                 Err(err) => tracing::warn!(%err, "release poll failed"),
@@ -110,9 +114,11 @@ pub fn spawn(pool: PgPool, mut shutdown: watch::Receiver<bool>) -> tokio::task::
     })
 }
 
-/// One poll iteration. Visible for tests + the manual "refresh now" admin
-/// action that the API can expose later.
-pub async fn poll_once(pool: &PgPool) -> Result<LatestRelease, PollerError> {
+/// One poll iteration. Fetches up to `RECENT_LIMIT` recent releases,
+/// filters them per channel, and writes both `settings.recent_releases`
+/// (the full list) and `settings.latest_release` (first item — back-compat
+/// for `rollout::create_rollout`).
+pub async fn poll_once(pool: &PgPool) -> Result<Vec<LatestRelease>, PollerError> {
     let repo = settings::get::<String>(pool, "update_repo")
         .await?
         .filter(|s| !s.trim().is_empty())
@@ -130,64 +136,81 @@ pub async fn poll_once(pool: &PgPool) -> Result<LatestRelease, PollerError> {
         ))
         .build()?;
 
-    let release_url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let resp = client.get(&release_url).send().await?;
+    let list_url = format!("https://api.github.com/repos/{repo}/releases?per_page={RECENT_LIMIT}");
+    let resp = client.get(&list_url).send().await?;
     let status = resp.status();
     if !status.is_success() {
         return Err(PollerError::BadStatus {
             status: status.as_u16(),
-            url: release_url,
+            url: list_url,
         });
     }
-    let raw: GhRelease = resp.json().await?;
+    let raw_list: Vec<GhRelease> = resp.json().await?;
 
-    // 'stable' channel skips prereleases; explicit 'all' (or anything else
-    // for forward-compat) accepts everything.
-    if channel == "stable" && raw.prerelease {
+    let mut releases: Vec<LatestRelease> = Vec::with_capacity(raw_list.len());
+    for raw in raw_list {
+        // 'stable' channel skips prereleases; explicit 'all' accepts everything.
+        if channel == "stable" && raw.prerelease {
+            continue;
+        }
+
+        let sha_map = fetch_sha256sums(&client, &raw.assets)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::debug!(tag = %raw.tag_name, %err, "SHA256SUMS unavailable for release");
+                HashMap::new()
+            });
+
+        let assets = raw
+            .assets
+            .iter()
+            .filter(|a| !a.name.starts_with("SHA256SUMS"))
+            .map(|a| ReleaseAsset {
+                sha256: sha_map.get(&a.name).cloned().unwrap_or_default(),
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size,
+            })
+            .collect::<Vec<_>>();
+
+        releases.push(LatestRelease {
+            tag: raw.tag_name,
+            name: raw.name,
+            html_url: raw.html_url,
+            prerelease: raw.prerelease,
+            published_at: raw.published_at,
+            fetched_at: OffsetDateTime::now_utc(),
+            assets,
+        });
+    }
+
+    if releases.is_empty() {
         return Err(PollerError::BadStatus {
             status: 404,
-            url: format!("{release_url} (prerelease skipped)"),
+            url: format!("{list_url} (no eligible releases for channel={channel})"),
         });
     }
 
-    let sha_map = fetch_sha256sums(&client, &raw.assets)
-        .await
-        .unwrap_or_else(|err| {
-            tracing::debug!(%err, "SHA256SUMS unavailable; release will have empty hashes");
-            HashMap::new()
-        });
+    let recent_value = serde_json::to_value(&releases)?;
+    let latest_value = serde_json::to_value(&releases[0])?;
 
-    let assets = raw
-        .assets
-        .iter()
-        .filter(|a| !a.name.starts_with("SHA256SUMS"))
-        .map(|a| ReleaseAsset {
-            sha256: sha_map.get(&a.name).cloned().unwrap_or_default(),
-            name: a.name.clone(),
-            url: a.browser_download_url.clone(),
-            size: a.size,
-        })
-        .collect::<Vec<_>>();
-
-    let rel = LatestRelease {
-        tag: raw.tag_name,
-        name: raw.name,
-        html_url: raw.html_url,
-        prerelease: raw.prerelease,
-        published_at: raw.published_at,
-        fetched_at: OffsetDateTime::now_utc(),
-        assets,
-    };
-
-    let value = serde_json::to_value(&rel)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"INSERT INTO settings (key, value) VALUES ('recent_releases', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"#,
+    )
+    .bind(recent_value)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         r#"INSERT INTO settings (key, value) VALUES ('latest_release', $1)
            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"#,
     )
-    .bind(value)
-    .execute(pool)
+    .bind(latest_value)
+    .execute(&mut *tx)
     .await?;
-    Ok(rel)
+    tx.commit().await?;
+    Ok(releases)
 }
 
 async fn fetch_sha256sums(

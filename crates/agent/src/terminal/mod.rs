@@ -112,6 +112,13 @@ impl Manager {
         );
     }
 
+    /// Recordings dir this manager writes to. Reused by the recording-fetch
+    /// handler so panel and agent agree on the on-disk layout.
+    #[must_use]
+    pub fn recording_dir(&self) -> &std::path::Path {
+        &self.recording_dir
+    }
+
     pub fn input(&mut self, msg: TerminalInput) {
         let TerminalInput { session_id, data } = msg;
         let Some(handle) = self.sessions.get(&session_id) else {

@@ -100,6 +100,8 @@ pub enum RolloutError {
     NoCachedRelease,
     #[error("requested version {asked} doesn't match cached {cached}")]
     VersionMismatch { asked: String, cached: String },
+    #[error("requested version {asked} is not in the cached recent_releases list")]
+    VersionUnknown { asked: String },
     #[error("percent must be between 1 and 100, got {0}")]
     PercentOutOfRange(i32),
     #[error("no eligible agents matched this rollout")]
@@ -179,6 +181,44 @@ pub fn agent_target_triple(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
+/// Locate the cached metadata for a target version.
+///
+/// Looks first in `recent_releases` (the multi-version cache populated by
+/// the poller); falls back to `latest_release` for back-compat with
+/// installations that haven't run the new poller yet. Returns
+/// `VersionUnknown` if neither cache mentions the requested tag.
+async fn pick_cached_release(pool: &PgPool, version: &str) -> Result<LatestRelease, RolloutError> {
+    if let Some(list) = crate::settings::get::<Vec<LatestRelease>>(pool, "recent_releases").await? {
+        if let Some(found) = list.into_iter().find(|r| r.tag == version) {
+            return Ok(found);
+        }
+        // The cache exists but doesn't contain the target. Surface that
+        // explicitly so the UI can prompt the admin to wait for the next
+        // poller tick or pin the asset URL manually.
+        return Err(RolloutError::VersionUnknown {
+            asked: version.to_owned(),
+        });
+    }
+
+    match crate::settings::get::<LatestRelease>(pool, "latest_release").await? {
+        Some(v) if v.tag == version => Ok(v),
+        Some(v) => Err(RolloutError::VersionMismatch {
+            asked: version.to_owned(),
+            cached: v.tag,
+        }),
+        None => Err(RolloutError::NoCachedRelease),
+    }
+}
+
+/// Public lookup used by the admin "/api/updates/recent" endpoint.
+pub async fn list_recent_releases(pool: &PgPool) -> Result<Vec<LatestRelease>, RolloutError> {
+    Ok(
+        crate::settings::get::<Vec<LatestRelease>>(pool, "recent_releases")
+            .await?
+            .unwrap_or_default(),
+    )
+}
+
 #[derive(sqlx::FromRow)]
 struct EligibleAgentRow {
     agent_id: Uuid,
@@ -201,16 +241,7 @@ pub async fn create_rollout(
         return Err(RolloutError::PercentOutOfRange(input.percent));
     }
 
-    let cached: LatestRelease = match crate::settings::get(pool, "latest_release").await? {
-        Some(v) => v,
-        None => return Err(RolloutError::NoCachedRelease),
-    };
-    if cached.tag != input.version {
-        return Err(RolloutError::VersionMismatch {
-            asked: input.version.clone(),
-            cached: cached.tag,
-        });
-    }
+    let cached: LatestRelease = pick_cached_release(pool, &input.version).await?;
 
     // Pull the eligible agent set: anything we have OS/arch for. We don't
     // enforce online-ness here — assignments stay `pending` until the

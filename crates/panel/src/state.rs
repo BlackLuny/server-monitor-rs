@@ -2,7 +2,12 @@
 
 use sqlx::PgPool;
 
-use crate::{grpc::SessionHub, live::LiveBus, probes::AssignmentBus, terminal::TerminalHub};
+use crate::{
+    grpc::SessionHub,
+    live::LiveBus,
+    probes::AssignmentBus,
+    terminal::{RecordingHub, TerminalHub},
+};
 
 /// Injected into every handler via `State<AppState>`. Cheap to clone — every
 /// field is already reference-counted internally (`PgPool` holds an `Arc`,
@@ -19,6 +24,9 @@ pub struct AppState {
     /// bridge. The agent_service inbound loop publishes TerminalOutput /
     /// TerminalClosed frames here; the WS handler drains them.
     pub terminal_hub: TerminalHub,
+    /// Routes `RecordingFetchChunk` frames from agents back to whichever
+    /// HTTP handler is currently streaming the recording to a browser.
+    pub recording_hub: RecordingHub,
     /// Whether session cookies should carry the `Secure` attribute.
     /// `false` is only correct for plain-HTTP local/dev deployments — the
     /// default elsewhere is `true`. Tests don't care, so the bare `new`
@@ -35,6 +43,7 @@ impl AppState {
             live: LiveBus::new(),
             assignment_bus: AssignmentBus::new(),
             terminal_hub: TerminalHub::new(),
+            recording_hub: RecordingHub::new(),
             cookies_secure: false,
         }
     }

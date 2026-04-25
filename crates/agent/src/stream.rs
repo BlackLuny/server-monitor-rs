@@ -253,11 +253,29 @@ fn handle_panel_msg(
                 crate::updates::handle_update(cmd, upstream, &mut local_seq).await;
             });
         }
-        DownPayload::UpdateAbort(_abort) => {
-            // Aborts arrive after the supervisor has already kicked off the
-            // download — there's no public IPC for "cancel mid-flight" yet,
-            // so we just log. M7.1 can wire this through if needed.
-            tracing::info!("update abort received; no in-flight cancellation today");
+        DownPayload::UpdateAbort(abort) => {
+            // Forward to the supervisor on its own task so the stream loop
+            // keeps draining metrics + heartbeats while the cancel + reply
+            // round-trip happens.
+            let upstream = up_tx.clone();
+            let seq_for_task = *seq;
+            *seq = seq.saturating_add(1);
+            tokio::spawn(async move {
+                let mut local_seq = seq_for_task;
+                crate::updates::handle_abort(abort, upstream, &mut local_seq).await;
+            });
+        }
+        DownPayload::RecordingFetch(req) => {
+            let dir = terminals.recording_dir().to_path_buf();
+            let upstream = up_tx.clone();
+            // Reserve a generous slice of seq for the streamed chunks. A 256 MiB
+            // recording at 64 KiB / chunk fits comfortably below 5000 frames;
+            // we round up to be safe.
+            let seq_for_task = *seq;
+            *seq = seq.saturating_add(8192);
+            tokio::spawn(async move {
+                crate::recordings::serve_fetch(req.session_id, dir, upstream, seq_for_task).await;
+            });
         }
         DownPayload::Ack(_) => {}
     }

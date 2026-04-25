@@ -197,6 +197,8 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let (staging_results_tx, staging_results_rx) = mpsc::unbounded_channel();
+
     let exit = run_loop(LoopCtx {
         root,
         state,
@@ -205,6 +207,9 @@ async fn main() -> anyhow::Result<()> {
         ipc_path,
         ipc_rx,
         shutdown,
+        staging_results_tx,
+        staging_results_rx,
+        inflight: None,
     })
     .await;
 
@@ -249,6 +254,29 @@ struct LoopCtx {
     ipc_path: PathBuf,
     ipc_rx: mpsc::Receiver<(ipc::Request, oneshot::Sender<ipc::Response>)>,
     shutdown: ShutdownRx,
+    /// Routes completed staging outcomes back into the run loop so the
+    /// reply oneshot can be answered + a [`PendingSwap`] enqueued without
+    /// the run loop blocking on the staging task itself. Aborts can
+    /// therefore preempt a download in progress.
+    staging_results_tx: mpsc::UnboundedSender<StagingResult>,
+    staging_results_rx: mpsc::UnboundedReceiver<StagingResult>,
+    /// At most one staging at a time. The cancel sender lets [`Request::Abort`]
+    /// preempt the in-flight download.
+    inflight: Option<InflightStage>,
+}
+
+struct InflightStage {
+    rollout_id: String,
+    version: String,
+    cancel: oneshot::Sender<()>,
+}
+
+struct StagingResult {
+    rollout_id: String,
+    version: String,
+    grace_s: u32,
+    reply: oneshot::Sender<ipc::Response>,
+    outcome: Result<staging::Staged, staging::StagingError>,
 }
 
 /// Holding-pen for an in-flight rollout. Set by IPC, consumed by the run
@@ -438,16 +466,17 @@ async fn run_child(
             ipc_msg = ctx.ipc_rx.recv() => {
                 match ipc_msg {
                     Some((request, reply)) => {
-                        let resp = handle_ipc(ctx, request, pending_swap);
-                        let _ = reply.send(resp);
-                        // If a swap was registered, kill the agent so the
-                        // outer loop can restart with the new binary.
-                        if pending_swap.is_some() {
-                            tracing::info!("agent restart triggered for swap");
-                            let _ = child.kill().await;
-                        }
+                        handle_ipc(ctx, request, reply);
                     }
                     None => continue,
+                }
+            }
+            staged = ctx.staging_results_rx.recv() => {
+                if let Some(result) = staged {
+                    if apply_staging_result(ctx, result, pending_swap) {
+                        tracing::info!("agent restart triggered for swap");
+                        let _ = child.kill().await;
+                    }
                 }
             }
             _ = ctx.shutdown.changed() => {
@@ -476,42 +505,115 @@ async fn run_child(
     }
 }
 
-fn handle_ipc(
-    ctx: &mut LoopCtx,
-    request: ipc::Request,
-    pending_swap: &mut Option<PendingSwap>,
-) -> ipc::Response {
+/// Dispatch one IPC request. `Update` spawns a cancellable staging task and
+/// returns immediately so the run loop can keep polling — the eventual
+/// success/failure response is sent from inside the spawned task. `Abort`
+/// fires the cancel oneshot for the matching in-flight stage and replies
+/// instantly.
+fn handle_ipc(ctx: &mut LoopCtx, request: ipc::Request, reply: oneshot::Sender<ipc::Response>) {
     match request {
         ipc::Request::Update {
             rollout_id,
             version,
             asset_url,
             sha256,
-            attestation_url: _,
+            attestation_url,
             grace_s,
         } => {
+            if ctx.inflight.is_some() {
+                let _ = reply.send(ipc::Response::error("another staging is in progress"));
+                return;
+            }
             tracing::info!(%rollout_id, %version, "supervisor received update request");
             ctx.state.staging = Some(version.clone());
             save_state(&ctx.root, &ctx.state);
+
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            ctx.inflight = Some(InflightStage {
+                rollout_id: rollout_id.clone(),
+                version: version.clone(),
+                cancel: cancel_tx,
+            });
+
             let versions = versions_dir(&ctx.root);
-            let runtime = tokio::runtime::Handle::current();
-            let result = runtime.block_on(staging::stage(&versions, &version, &asset_url, &sha256));
-            match result {
-                Ok(staged) => {
-                    *pending_swap = Some(PendingSwap {
-                        new_version: version,
-                        new_binary: staged.agent_binary,
-                        grace: Duration::from_secs(u64::from(grace_s.max(1))).max(DEFAULT_GRACE),
-                    });
-                    ipc::Response::ok()
+            let results_tx = ctx.staging_results_tx.clone();
+            tokio::spawn(async move {
+                let outcome = staging::stage_cancellable(
+                    &versions,
+                    &version,
+                    &asset_url,
+                    &sha256,
+                    &attestation_url,
+                    Some(cancel_rx),
+                )
+                .await;
+                let _ = results_tx.send(StagingResult {
+                    rollout_id,
+                    version,
+                    grace_s,
+                    reply,
+                    outcome,
+                });
+            });
+        }
+        ipc::Request::Abort { rollout_id } => {
+            let matched = ctx
+                .inflight
+                .as_ref()
+                .is_some_and(|stage| stage.rollout_id == rollout_id);
+            if matched {
+                if let Some(stage) = ctx.inflight.take() {
+                    tracing::info!(%rollout_id, version = %stage.version, "abort: cancelling staging");
+                    let _ = stage.cancel.send(());
                 }
-                Err(err) => {
-                    tracing::warn!(%err, version, "staging failed");
-                    ctx.state.staging = None;
-                    save_state(&ctx.root, &ctx.state);
-                    ipc::Response::error(err.to_string())
-                }
+                let _ = reply.send(ipc::Response::ok());
+            } else {
+                let _ = reply.send(ipc::Response::error("no matching staging in progress"));
             }
+        }
+    }
+}
+
+/// Returns true if the result produced a `PendingSwap`, signalling that the
+/// caller should restart the agent.
+fn apply_staging_result(
+    ctx: &mut LoopCtx,
+    result: StagingResult,
+    pending_swap: &mut Option<PendingSwap>,
+) -> bool {
+    let StagingResult {
+        rollout_id,
+        version,
+        grace_s,
+        reply,
+        outcome,
+    } = result;
+
+    // Drop the inflight slot regardless — the staging task is done.
+    if let Some(slot) = ctx.inflight.take() {
+        if slot.rollout_id != rollout_id {
+            // Shouldn't happen given we serialise on the run loop, but if a
+            // race ever opens we put it back; the new in-flight wins.
+            ctx.inflight = Some(slot);
+        }
+    }
+
+    match outcome {
+        Ok(staged) => {
+            *pending_swap = Some(PendingSwap {
+                new_version: version,
+                new_binary: staged.agent_binary,
+                grace: Duration::from_secs(u64::from(grace_s.max(1))).max(DEFAULT_GRACE),
+            });
+            let _ = reply.send(ipc::Response::ok());
+            true
+        }
+        Err(err) => {
+            tracing::warn!(%err, version, "staging failed");
+            ctx.state.staging = None;
+            save_state(&ctx.root, &ctx.state);
+            let _ = reply.send(ipc::Response::error(err.to_string()));
+            false
         }
     }
 }

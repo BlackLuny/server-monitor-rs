@@ -21,14 +21,17 @@ pub enum Request {
         version: String,
         asset_url: String,
         sha256: String,
-        // The Sigstore attestation bundle URL. Reserved for future
-        // verification; today only sha256 is enforced.
+        // The Sigstore attestation bundle URL. Used by the optional
+        // attestation gate (see `settings.attestation_required`); always
+        // forwarded so the supervisor can verify before swap.
         #[serde(default)]
-        #[allow(dead_code)]
         attestation_url: String,
         #[serde(default = "default_grace")]
         grace_s: u32,
     },
+    /// Cancel an in-flight staging task. The supervisor matches by
+    /// `rollout_id`; if no matching staging is in flight it's a no-op.
+    Abort { rollout_id: String },
 }
 
 fn default_grace() -> u32 {

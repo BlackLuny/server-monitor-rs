@@ -15,7 +15,8 @@
 use std::path::PathBuf;
 
 use monitor_proto::v1::{
-    agent_to_panel::Payload as UpPayload, AgentToPanel, UpdateAgent, UpdateState, UpdateStatus,
+    agent_to_panel::Payload as UpPayload, AgentToPanel, UpdateAbort, UpdateAgent, UpdateState,
+    UpdateStatus,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -66,6 +67,9 @@ enum Request {
         sha256: String,
         attestation_url: String,
         grace_s: u32,
+    },
+    Abort {
+        rollout_id: String,
     },
 }
 
@@ -156,6 +160,47 @@ pub async fn handle_update(cmd: UpdateAgent, upstream: mpsc::Sender<AgentToPanel
             .await;
         }
     }
+}
+
+/// Forward an `UpdateAbort` to the supervisor's IPC. Best-effort: the
+/// supervisor matches by rollout_id; if no staging is in flight it's a
+/// no-op. We always publish a final UpdateStatus so the panel can flag
+/// the assignment as failed.
+pub async fn handle_abort(cmd: UpdateAbort, upstream: mpsc::Sender<AgentToPanel>, seq: &mut u64) {
+    let UpdateAbort { rollout_id, reason } = cmd;
+    if rollout_id.is_empty() {
+        tracing::warn!("UpdateAbort dropped — empty rollout_id");
+        return;
+    }
+
+    let detail = if reason.is_empty() {
+        "aborted by panel".to_owned()
+    } else {
+        format!("aborted: {reason}")
+    };
+
+    let request = Request::Abort {
+        rollout_id: rollout_id.clone(),
+    };
+    let path = default_ipc_path();
+    let outcome = send_request(&path, &request).await;
+    let final_detail = match outcome {
+        Ok(resp) if resp.ok => detail,
+        Ok(resp) => resp
+            .error
+            .unwrap_or_else(|| "supervisor refused abort".into()),
+        Err(err) => format!("supervisor IPC: {err}"),
+    };
+
+    emit_status(
+        &upstream,
+        seq,
+        &rollout_id,
+        "",
+        UpdateState::Failed,
+        &final_detail,
+    )
+    .await;
 }
 
 async fn emit_status(

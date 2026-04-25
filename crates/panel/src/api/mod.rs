@@ -110,8 +110,13 @@ pub fn router(state: AppState) -> Router {
             get(terminals::list_for_server),
         )
         .route("/api/recordings/:session_id", get(terminals::recording))
+        .route(
+            "/api/recordings/:session_id/download",
+            get(terminals::download_recording),
+        )
         // ---- self-update orchestration (admin only) ----
         .route("/api/updates/latest", get(updates::latest))
+        .route("/api/updates/recent", get(updates::recent))
         .route(
             "/api/updates/rollouts",
             get(updates::list).post(updates::create),

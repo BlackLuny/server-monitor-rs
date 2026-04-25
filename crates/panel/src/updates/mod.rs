@@ -10,11 +10,13 @@
 //!   - The agent stream handler consumes [`AssignmentUpdate`] events to
 //!     keep `update_assignments.state` fresh as agents report progress.
 
+pub mod dispatch;
 pub mod poller;
 pub mod rollout;
 
 pub use poller::{LatestRelease, ReleaseAsset};
 pub use rollout::{
-    abort_rollout, agent_target_triple, create_rollout, get_rollout, list_rollouts, pause_rollout,
-    resume_rollout, AgentFilter, CreateRolloutInput, RolloutSummary, RolloutView,
+    abort_rollout, agent_target_triple, create_rollout, get_rollout, list_recent_releases,
+    list_rollouts, pause_rollout, resume_rollout, AgentFilter, CreateRolloutInput, RolloutSummary,
+    RolloutView,
 };

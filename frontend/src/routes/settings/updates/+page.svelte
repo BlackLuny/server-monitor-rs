@@ -22,6 +22,7 @@
     createRollout,
     getLatestRelease,
     listAgents,
+    listRecentReleases,
     listRollouts,
     pauseRollout,
     resumeRollout,
@@ -31,6 +32,7 @@
   } from '$lib/api';
 
   let latest = $state<LatestRelease | null>(null);
+  let recent = $state<LatestRelease[]>([]);
   let rollouts = $state<RolloutSummary[]>([]);
   let agents = $state<AgentRow[]>([]);
   let loading = $state(true);
@@ -40,14 +42,25 @@
   let percent = $state(100);
   let note = $state('');
   let selectedAgents = $state<Set<string>>(new Set());
+  /** The version the admin actually wants to ship — defaults to the latest
+   *  cached entry; rollback chooses an older one. */
+  let targetVersion = $state<string>('');
 
   let timer: ReturnType<typeof setInterval> | null = null;
 
   async function reload() {
     try {
-      const [rel, list] = await Promise.all([getLatestRelease(), listRollouts()]);
+      const [rel, recentList, list] = await Promise.all([
+        getLatestRelease(),
+        listRecentReleases().catch(() => [] as LatestRelease[]),
+        listRollouts()
+      ]);
       latest = rel ?? null;
+      recent = recentList;
       rollouts = list;
+      // Default to the cached latest, but only the first time so the user's
+      // selection persists across the 10s refresh.
+      if (!targetVersion && latest) targetVersion = latest.tag;
       error = null;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -55,6 +68,10 @@
       loading = false;
     }
   }
+
+  const targetRelease = $derived(
+    recent.find((r) => r.tag === targetVersion) ?? latest
+  );
 
   onMount(async () => {
     if (!authStore.state.loaded) await authStore.refresh();
@@ -77,13 +94,13 @@
 
   async function submitRollout(e: Event) {
     e.preventDefault();
-    if (!latest) return;
+    if (!targetRelease) return;
     creating = true;
     createError = null;
     try {
       const ids = [...selectedAgents];
       await createRollout({
-        version: latest.tag,
+        version: targetRelease.tag,
         percent,
         agent_ids: ids,
         note: note.trim() || undefined
@@ -98,6 +115,19 @@
       creating = false;
     }
   }
+
+  function rollbackTo(version: string) {
+    targetVersion = version;
+    // Pre-fill a hint so the rollout list shows why this happened.
+    if (!note.trim()) note = `rollback to ${version}`;
+    // Scroll the form into view; the user still has to confirm.
+    const el = document.getElementById('rollout-form');
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  const isRollback = $derived(
+    targetRelease != null && latest != null && targetRelease.tag !== latest.tag
+  );
 
   async function transition(id: number, op: 'pause' | 'resume' | 'abort') {
     const fn = op === 'pause' ? pauseRollout : op === 'resume' ? resumeRollout : abortRollout;
@@ -231,8 +261,32 @@
         </ul>
       </details>
 
-      <form class="grid gap-4 md:grid-cols-[1fr_auto]" onsubmit={submitRollout}>
+      <form id="rollout-form" class="grid gap-4 md:grid-cols-[1fr_auto]" onsubmit={submitRollout}>
         <div class="grid gap-3">
+          {#if recent.length > 1}
+            <label class="flex items-center gap-3">
+              <span class="w-24 font-mono text-2xs uppercase tracking-[0.14em] text-fg-tertiary">
+                version
+              </span>
+              <select
+                bind:value={targetVersion}
+                class="flex-1 rounded border border-border bg-recess px-2 py-1 font-mono text-xs"
+              >
+                {#each recent as r (r.tag)}
+                  <option value={r.tag}>
+                    {r.tag}
+                    {r.tag === latest?.tag ? '· latest' : ''}
+                    {r.prerelease ? '· prerelease' : ''}
+                  </option>
+                {/each}
+              </select>
+              {#if isRollback}
+                <span
+                  class="font-mono text-2xs uppercase tracking-[0.14em] text-warning"
+                >rollback</span>
+              {/if}
+            </label>
+          {/if}
           <label class="flex items-center gap-3">
             <span class="w-24 font-mono text-2xs uppercase tracking-[0.14em] text-fg-tertiary">
               percent
@@ -340,6 +394,16 @@
                     class="rounded border border-error px-2 py-1 font-mono text-2xs uppercase tracking-[0.14em] text-error hover:bg-elev-2"
                     onclick={() => transition(r.id, 'abort')}>abort</button
                   >
+                {:else if (r.state === 'aborted' || r.state === 'completed') && recent.some((rl) => rl.tag !== r.version)}
+                  {@const previous = recent.find((rl) => rl.tag !== r.version)?.tag}
+                  {#if previous}
+                    <button
+                      type="button"
+                      class="rounded border border-warning px-2 py-1 font-mono text-2xs uppercase tracking-[0.14em] text-warning hover:bg-elev-2"
+                      onclick={() => rollbackTo(previous)}
+                      title="Pre-fill the form with this version"
+                    >rollback to {previous}</button>
+                  {/if}
                 {/if}
               </div>
             </div>

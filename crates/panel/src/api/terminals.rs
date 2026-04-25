@@ -1,24 +1,30 @@
-//! Terminal session listings + recording metadata.
+//! Terminal session listings + recording streaming.
 //!
-//! M5 simplification: recordings live on the agent's filesystem. This
-//! endpoint surfaces the metadata (path / size / sha256) so an operator can
-//! retrieve a `.cast` over SSH and play it back with
-//! `asciinema play /var/lib/monitor-agent/recordings/<id>.cast`.
-//! Streamed downloads are scheduled for M5.1, which will add a dedicated
-//! gRPC fetch RPC so the panel can range-request chunks.
+//! Recordings live on the agent's filesystem. The metadata endpoint surfaces
+//! path / size / sha256, and `download` proxies a streamed `.cast` via the
+//! existing gRPC channel — so admins can play back `asciinema play <file>`
+//! without ever shelling into the host.
 
 #![allow(clippy::result_large_err, clippy::type_complexity)]
 
 use axum::{
+    body::Body,
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
+};
+use futures::stream::Stream;
+use monitor_proto::v1::{
+    panel_to_agent::Payload as DownPayload, PanelToAgent, RecordingFetchChunk,
+    RecordingFetchRequest,
 };
 use serde::Serialize;
 use sqlx::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+use crate::terminal::recordings::FetchGuard;
 
 use crate::{auth::AdminUser, state::AppState};
 
@@ -110,6 +116,126 @@ pub async fn recording(
         recording_sha256: sha,
         fetch_hint: hint,
     }))
+}
+
+/// Stream the .cast file for a closed session by routing a fetch through
+/// the agent's existing gRPC channel.
+pub async fn download_recording(
+    AdminUser(_): AdminUser,
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Response, Response> {
+    let row: Option<(Uuid, Option<String>, Option<i64>)> = sqlx::query_as(
+        r#"SELECT s.agent_id, t.recording_path, t.recording_size
+             FROM terminal_sessions t
+             JOIN servers s ON s.id = t.server_id
+             WHERE t.id = $1"#,
+    )
+    .bind(session_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+
+    let Some((agent_id, path, size)) = row else {
+        return Err((StatusCode::NOT_FOUND, "session not found").into_response());
+    };
+    if path.as_deref().map(str::is_empty).unwrap_or(true) {
+        return Err((StatusCode::NOT_FOUND, "no recording captured").into_response());
+    }
+
+    // Agent must be online — recordings live on its disk; the panel does
+    // not cache them. Reflect this honestly so the UI can prompt the
+    // admin to wake the host.
+    let Some(session) = state.hub.get(&agent_id) else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "agent offline").into_response());
+    };
+
+    let session_str = session_id.to_string();
+    let (rx, guard) = state.recording_hub.open(session_str.clone());
+
+    let request = PanelToAgent {
+        seq: 0,
+        payload: Some(DownPayload::RecordingFetch(RecordingFetchRequest {
+            session_id: session_str.clone(),
+        })),
+    };
+    if !session.try_send(request) {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "agent channel full").into_response());
+    }
+
+    let body_stream = chunks_to_body_stream(rx, guard);
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-asciinema-recording")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{session_id}.cast\""),
+        )
+        .body(Body::from_stream(body_stream))
+        .map_err(|err| {
+            tracing::error!(%err, "failed to build streamed response");
+            (StatusCode::INTERNAL_SERVER_ERROR, "stream init failed").into_response()
+        })?;
+
+    if let Some(bytes) = size.filter(|&n| n > 0) {
+        response.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            bytes.to_string().parse().expect("u64 → header"),
+        );
+    }
+    Ok(response)
+}
+
+/// State threaded through `futures::stream::unfold` so the [`FetchGuard`]
+/// drops with the stream — that removes the slot from the hub the moment
+/// the client disconnects.
+struct StreamState {
+    rx: tokio::sync::mpsc::Receiver<RecordingFetchChunk>,
+    _guard: FetchGuard,
+    done: bool,
+}
+
+/// Turn the agent-side chunked protocol into a byte stream Axum can serve.
+/// Stops at the first frame with `eof = true`. Errors are surfaced as a
+/// stream-level `io::Error`, which truncates the body so the client sees
+/// an incomplete download rather than a silent success.
+fn chunks_to_body_stream(
+    rx: tokio::sync::mpsc::Receiver<RecordingFetchChunk>,
+    guard: FetchGuard,
+) -> impl Stream<Item = Result<bytes::Bytes, std::io::Error>> {
+    let init = StreamState {
+        rx,
+        _guard: guard,
+        done: false,
+    };
+    futures::stream::unfold(init, |mut state| async move {
+        if state.done {
+            return None;
+        }
+        match state.rx.recv().await {
+            Some(chunk) => {
+                if !chunk.error.is_empty() {
+                    state.done = true;
+                    return Some((Err(std::io::Error::other(chunk.error)), state));
+                }
+                if chunk.eof {
+                    state.done = true;
+                    if chunk.data.is_empty() {
+                        return None;
+                    }
+                    return Some((Ok(bytes::Bytes::from(chunk.data)), state));
+                }
+                Some((Ok(bytes::Bytes::from(chunk.data)), state))
+            }
+            None => {
+                state.done = true;
+                Some((
+                    Err(std::io::Error::other("recording stream ended early")),
+                    state,
+                ))
+            }
+        }
+    })
 }
 
 fn internal(err: sqlx::Error) -> Response {

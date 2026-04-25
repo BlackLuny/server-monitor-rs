@@ -7,8 +7,45 @@ supervisor moving in lockstep.
 
 ## [Unreleased]
 
-Nothing yet — track in-flight work in
-[the milestone roadmap](../README.md#roadmap) until the next tag.
+### M7.1 — Recordings
+- gRPC adds `RecordingFetchRequest` (panel → agent) and
+  `RecordingFetchChunk` (agent → panel) so the panel can stream a
+  `.cast` over the existing channel.
+- Panel exposes `GET /api/recordings/:session_id/download`; the new
+  `RecordingHub` routes incoming chunks to the HTTP body stream.
+- Agent serves the request from `<recordings_dir>/<session_id>.cast`,
+  capped at 256 MiB and validated against path-traversal.
+- Terminal page lists recent sessions with one-click `.cast` download.
+
+### M7.2 — Cancellable updates
+- Supervisor `Request::Abort { rollout_id }` cancels an in-flight
+  staging download via a oneshot fired into the reqwest body await.
+- Panel API `POST /api/updates/rollouts/:id/abort` now also pushes
+  `PanelToAgent::UpdateAbort` to every connected agent in the set and
+  marks pending/sent assignments `failed`.
+- Agent forwards `UpdateAbort` to the supervisor over IPC and emits a
+  final `UpdateStatus::Failed` so the rollout row updates promptly.
+- Panel dispatches `UpdateAgent` on rollout create + on agent reconnect
+  (catch-up for offline agents).
+
+### M7.3 — Multi-version rollback
+- Poller caches the most recent ten releases under
+  `settings.recent_releases`; `latest_release` remains the first entry
+  for back-compat.
+- `create_rollout` accepts any tag in the cache (rollback or roll
+  forward); a new `version_unknown` error replaces the previous
+  `version_mismatch` for unknown tags.
+- New endpoint `GET /api/updates/recent` returns the cached list.
+- `/settings/updates` UI gains a version dropdown and a one-click
+  "rollback to vX.Y.Z" button on every aborted/completed rollout row.
+
+### M7.4 — Optional attestation enforcement
+- Setting `attestation_required` (default `false`). When true, the
+  panel includes the configured `update_repo` in
+  `UpdateAgent.attestation_url`.
+- Supervisor runs `gh attestation verify <archive> --repo <repo>` after
+  the sha256 check; failure (or missing `gh` binary) aborts the swap.
+- Documented end-to-end in `docs/release-process.md` §4a.
 
 ## [0.1.0] — 2026-04-25
 
