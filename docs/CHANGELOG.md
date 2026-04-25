@@ -7,6 +7,16 @@ supervisor moving in lockstep.
 
 ## [Unreleased]
 
+Nothing yet — track in-flight work in
+[the milestone roadmap](../README.md#roadmap) until the next tag.
+
+## [0.2.0] — 2026-04-25
+
+Builds on `v0.1.0` with the four follow-ups that close the M7 loop. Schema
+unchanged; the supervisor handles `Request::Abort` in addition to the
+existing `Update`. New `settings.recent_releases` is populated by the
+poller on next tick; older installs auto-upgrade with no migration.
+
 ### M7.1 — Recordings
 - gRPC adds `RecordingFetchRequest` (panel → agent) and
   `RecordingFetchChunk` (agent → panel) so the panel can stream a
@@ -85,5 +95,6 @@ First public release. Includes everything from M1 → M7 phase 3.
 - `.github/workflows/release.yml`: tag-driven build matrix, Sigstore
   build-provenance attestations, GitHub Release publishing.
 
-[Unreleased]: https://github.com/BlackLuny/server-monitor-rs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/BlackLuny/server-monitor-rs/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/BlackLuny/server-monitor-rs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/BlackLuny/server-monitor-rs/releases/tag/v0.1.0
