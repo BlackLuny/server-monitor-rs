@@ -14,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use futures::stream::Stream;
+use futures::stream::{Stream, StreamExt};
 use monitor_proto::v1::{
     panel_to_agent::Payload as DownPayload, PanelToAgent, RecordingFetchChunk,
     RecordingFetchRequest,
@@ -208,6 +208,9 @@ fn chunks_to_body_stream(
         _guard: guard,
         done: false,
     };
+    // `.fuse()` is essential: hyper / axum's body machinery may poll the
+    // stream once more after it returns Ready(None), and unfold panics in
+    // that case. Fused streams are required to keep returning None safely.
     futures::stream::unfold(init, |mut state| async move {
         if state.done {
             return None;
@@ -236,6 +239,7 @@ fn chunks_to_body_stream(
             }
         }
     })
+    .fuse()
 }
 
 fn internal(err: sqlx::Error) -> Response {
