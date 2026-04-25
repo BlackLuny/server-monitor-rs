@@ -64,6 +64,12 @@ pub struct ServerRow {
     pub agent_version: Option<String>,
     pub location: Option<String>,
     pub flag_emoji: Option<String>,
+    /// Admin-only policy fields. Hidden in guest responses since they
+    /// reveal access posture (whether the host has SSH enabled, whether
+    /// sessions are recorded). The settings page reads them to seed the
+    /// edit form so an operator doesn't need a second round-trip.
+    pub terminal_enabled: Option<bool>,
+    pub ssh_recording: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -134,6 +140,7 @@ SELECT
     s.hw_virtualization,
     s.agent_version,
     s.location, s.flag_emoji,
+    s.terminal_enabled, s.ssh_recording,
     latest.ts,
     latest.cpu_pct, latest.mem_used, latest.mem_total,
     latest.swap_used, latest.swap_total, latest.load_1,
@@ -179,6 +186,8 @@ struct ServerRowDb {
     agent_version: Option<String>,
     location: Option<String>,
     flag_emoji: Option<String>,
+    terminal_enabled: Option<bool>,
+    ssh_recording: Option<String>,
 
     ts: Option<OffsetDateTime>,
     cpu_pct: Option<f64>,
@@ -243,6 +252,8 @@ impl ServerRowDb {
             agent_version: self.agent_version,
             location: self.location,
             flag_emoji: self.flag_emoji,
+            terminal_enabled: if guest { None } else { self.terminal_enabled },
+            ssh_recording: if guest { None } else { self.ssh_recording },
         }
     }
 }

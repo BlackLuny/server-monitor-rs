@@ -18,6 +18,9 @@ export interface ServerRow {
   agent_version: string | null;
   location: string | null;
   flag_emoji: string | null;
+  /** Admin-only policy fields. Null in guest responses. */
+  terminal_enabled: boolean | null;
+  ssh_recording: 'default' | 'on' | 'off' | null;
 }
 
 export interface Hardware {
