@@ -247,10 +247,14 @@ async fn handle_payload(
         AgentPayload::ProbeBatch(b) => {
             ingest_probe_results(state, session, &b.results).await;
         }
-        // M5 will handle terminal IO; M7 the update status.
-        AgentPayload::TerminalOutput(_)
-        | AgentPayload::TerminalClosed(_)
-        | AgentPayload::UpdateStatus(_) => {}
+        AgentPayload::TerminalOutput(out) => {
+            state.terminal_hub.deliver_output(out);
+        }
+        AgentPayload::TerminalClosed(closed) => {
+            state.terminal_hub.deliver_closed(&state.pool, closed).await;
+        }
+        // M7 will handle update status.
+        AgentPayload::UpdateStatus(_) => {}
     }
 }
 

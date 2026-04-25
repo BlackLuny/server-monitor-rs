@@ -32,6 +32,7 @@ tracing-subscriber = { workspace = true }
 
 clap = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 
 sysinfo = { workspace = true }
@@ -39,6 +40,9 @@ hostname = { workspace = true }
 
 surge-ping = { workspace = true }
 reqwest = { workspace = true }
+
+portable-pty = { workspace = true }
+sha2 = { workspace = true }
 
 rand = { workspace = true }
 regex = { workspace = true }

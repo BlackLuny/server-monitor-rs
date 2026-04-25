@@ -13,6 +13,8 @@ mod servers;
 mod settings;
 mod setup;
 mod static_files;
+mod terminal_ws;
+mod terminals;
 mod totp;
 mod users;
 mod ws;
@@ -101,8 +103,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings/:key", put(settings::put_one))
         // ---- audit log ----
         .route("/api/audit", audit_limit)
+        // ---- terminal sessions (admin only) ----
+        .route(
+            "/api/servers/:id/terminal-sessions",
+            get(terminals::list_for_server),
+        )
+        .route("/api/recordings/:session_id", get(terminals::recording))
         // ---- websocket ----
         .route("/ws/live", get(ws::handler))
+        .route("/ws/terminal/:server_id", get(terminal_ws::handler))
         .fallback(static_files::handler)
         // CSRF guard on every mutating method via Origin-check middleware.
         .layer(middleware::from_fn(auth_mod::csrf::require_same_origin))

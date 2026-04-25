@@ -55,3 +55,12 @@ pub async fn agent_endpoint(pool: &PgPool) -> Result<Option<String>, SettingsErr
 pub async fn guest_enabled(pool: &PgPool) -> Result<bool, SettingsError> {
     Ok(get::<bool>(pool, "guest_enabled").await?.unwrap_or(true))
 }
+
+/// Global default for whether SSH/web-terminal sessions get recorded. The
+/// per-server `ssh_recording` column overrides this when set to `'on'` /
+/// `'off'`; `'default'` defers to this value. Off when unset.
+pub async fn ssh_recording_default(pool: &PgPool) -> Result<bool, SettingsError> {
+    Ok(get::<bool>(pool, "ssh_recording_enabled")
+        .await?
+        .unwrap_or(false))
+}

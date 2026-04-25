@@ -15,7 +15,12 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::transport::Channel;
 
-use crate::{collector::Collector, config::AgentConfig, probes::Scheduler};
+use crate::{
+    collector::Collector,
+    config::AgentConfig,
+    probes::Scheduler,
+    terminal::{self, Manager as TerminalManager},
+};
 
 /// Maximum backoff between reconnect attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -125,6 +130,11 @@ async fn run_once(
     // reconnect, and any in-flight results are best-effort.
     let (mut probe_sched, mut probe_rx) = Scheduler::new(512);
 
+    // Terminal sessions are also fresh per connection — if the panel goes
+    // away mid-session we kill the child and the user reconnects to a new
+    // shell. Avoids ghost ptys outliving their bridge.
+    let mut terminals = TerminalManager::new(up_tx.clone(), terminal::default_recording_dir());
+
     let mut heartbeat_ticker =
         tokio::time::interval(Duration::from_secs(heartbeat_interval_s.max(1)));
     heartbeat_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -149,14 +159,18 @@ async fn run_once(
             msg = inbound.next() => {
                 match msg {
                     Some(Ok(panel_msg)) => {
-                        handle_panel_msg(panel_msg, &mut probe_sched);
+                        handle_panel_msg(panel_msg, &mut probe_sched, &mut terminals);
                     }
-                    Some(Err(status)) => return Err(status),
+                    Some(Err(status)) => {
+                        terminals.shutdown_all();
+                        return Err(status);
+                    }
                     None => {
                         // Best-effort final flush of any buffered samples so
                         // we don't lose the last ~5s when the panel goes away.
                         let _ = flush_metrics(&up_tx, buffer, &mut seq).await;
                         let _ = flush_probes(&up_tx, &mut probe_rx, &mut seq).await;
+                        terminals.shutdown_all();
                         return Ok(());
                     }
                 }
@@ -187,6 +201,7 @@ async fn run_once(
                     tracing::info!("shutdown requested, flushing and closing stream");
                     let _ = flush_metrics(&up_tx, buffer, &mut seq).await;
                     let _ = flush_probes(&up_tx, &mut probe_rx, &mut seq).await;
+                    terminals.shutdown_all();
                     return Ok(());
                 }
             }
@@ -194,7 +209,11 @@ async fn run_once(
     }
 }
 
-fn handle_panel_msg(msg: monitor_proto::v1::PanelToAgent, sched: &mut Scheduler) {
+fn handle_panel_msg(
+    msg: monitor_proto::v1::PanelToAgent,
+    sched: &mut Scheduler,
+    terminals: &mut TerminalManager,
+) {
     let Some(payload) = msg.payload else { return };
     match payload {
         DownPayload::ProbeAssignmentSync(s) => {
@@ -210,14 +229,12 @@ fn handle_panel_msg(msg: monitor_proto::v1::PanelToAgent, sched: &mut Scheduler)
             );
             sched.apply_delta(d.added, d.updated, d.removed_probe_ids);
         }
-        // Acks, terminal IO, updates: handled by other modules in later milestones.
-        DownPayload::Ack(_)
-        | DownPayload::TerminalOpen(_)
-        | DownPayload::TerminalInput(_)
-        | DownPayload::TerminalResize(_)
-        | DownPayload::TerminalClose(_)
-        | DownPayload::Update(_)
-        | DownPayload::UpdateAbort(_) => {
+        DownPayload::TerminalOpen(open) => terminals.open(open),
+        DownPayload::TerminalInput(input) => terminals.input(input),
+        DownPayload::TerminalResize(rs) => terminals.resize(rs),
+        DownPayload::TerminalClose(c) => terminals.close(c),
+        // Acks and self-update payloads are handled in later milestones.
+        DownPayload::Ack(_) | DownPayload::Update(_) | DownPayload::UpdateAbort(_) => {
             tracing::debug!("ignoring panel→agent payload not yet handled");
         }
     }

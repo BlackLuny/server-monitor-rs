@@ -2,7 +2,7 @@
 
 use sqlx::PgPool;
 
-use crate::{grpc::SessionHub, live::LiveBus, probes::AssignmentBus};
+use crate::{grpc::SessionHub, live::LiveBus, probes::AssignmentBus, terminal::TerminalHub};
 
 /// Injected into every handler via `State<AppState>`. Cheap to clone — every
 /// field is already reference-counted internally (`PgPool` holds an `Arc`,
@@ -15,6 +15,10 @@ pub struct AppState {
     /// Probe assignment broadcast — anyone who mutates probe state calls
     /// `assignment_bus.publish()` to nudge the scheduler.
     pub assignment_bus: AssignmentBus,
+    /// Terminal session router — owned by the panel side of the Web SSH
+    /// bridge. The agent_service inbound loop publishes TerminalOutput /
+    /// TerminalClosed frames here; the WS handler drains them.
+    pub terminal_hub: TerminalHub,
     /// Whether session cookies should carry the `Secure` attribute.
     /// `false` is only correct for plain-HTTP local/dev deployments — the
     /// default elsewhere is `true`. Tests don't care, so the bare `new`
@@ -30,6 +34,7 @@ impl AppState {
             hub: SessionHub::new(),
             live: LiveBus::new(),
             assignment_bus: AssignmentBus::new(),
+            terminal_hub: TerminalHub::new(),
             cookies_secure: false,
         }
     }

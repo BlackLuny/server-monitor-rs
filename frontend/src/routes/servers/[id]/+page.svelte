@@ -27,6 +27,7 @@
     percent,
     usagePct
   } from '$lib/format';
+  import { authStore } from '$lib/auth.svelte';
 
   const RANGES = [
     { key: '1h', label: '1 hour' },
@@ -156,13 +157,22 @@
       <span class="font-mono text-2xs uppercase tracking-wider text-fg-tertiary">
         {server?.display_name ?? '…'}
       </span>
-      <button
-        class="h-7 rounded border border-border px-3 font-mono text-2xs uppercase tracking-wider text-fg-secondary hover:border-border-strong hover:text-fg disabled:cursor-not-allowed disabled:text-fg-quaternary"
-        disabled
-        title="Web terminal lands in M5"
-      >
-        open terminal
-      </button>
+      {#if authStore.state.user?.role === 'admin' && server?.online}
+        <a
+          href={`/servers/${serverId}/terminal`}
+          class="inline-flex h-7 items-center rounded border border-border px-3 font-mono text-2xs uppercase tracking-wider text-fg-secondary transition-colors hover:border-border-strong hover:text-fg"
+        >
+          open terminal
+        </a>
+      {:else}
+        <button
+          class="inline-flex h-7 items-center rounded border border-border px-3 font-mono text-2xs uppercase tracking-wider text-fg-quaternary"
+          disabled
+          title={authStore.state.user?.role === 'admin' ? 'agent offline' : 'admin only'}
+        >
+          open terminal
+        </button>
+      {/if}
     </div>
   </header>
 

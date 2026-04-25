@@ -255,6 +255,7 @@ message TerminalOpen {
     uint32 cols = 2;
     uint32 rows = 3;
     string shell = 4;             // empty = agent default ($SHELL / bash / cmd)
+    bool record = 5;              // write asciinema .cast to agent's recordings dir
 }
 
 message TerminalInput {
@@ -281,6 +282,11 @@ message TerminalClosed {
     string session_id = 1;
     int32 exit_code = 2;         // negative when killed by signal
     string error = 3;
+    // Recording metadata, set when `TerminalOpen.record` was true and the
+    // agent successfully finalised the asciinema .cast on disk.
+    string recording_path = 4;   // absolute path on the agent's filesystem
+    int64  recording_size = 5;   // bytes
+    string recording_sha256 = 6; // hex-encoded sha256 of the file contents
 }
 
 // ----------------------------------------------------------------------------
