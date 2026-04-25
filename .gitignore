@@ -22,6 +22,7 @@ config.local.yaml
 .vscode/
 !.vscode/extensions.json
 .fleet/
+.claude/
 *.swp
 *.swo
 .DS_Store
