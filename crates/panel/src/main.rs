@@ -63,6 +63,10 @@ async fn main() -> anyhow::Result<()> {
     .spawn(shutdown_rx.clone());
     monitor_panel::probes::rollup::spawn(app_state.pool.clone(), shutdown_rx.clone());
 
+    // GitHub Releases poller — keeps `settings.latest_release` cached so
+    // the rollout API responds instantly without hitting the API per-call.
+    monitor_panel::updates::poller::spawn(app_state.pool.clone(), shutdown_rx.clone());
+
     let http = tokio::spawn(http_server::run(
         cfg.http.listen,
         app_state.clone(),

@@ -42,6 +42,8 @@ qrcode = { workspace = true }
 
 tonic = { workspace = true }
 
+reqwest = { workspace = true }
+
 clap = { workspace = true }
 figment = { workspace = true }
 serde = { workspace = true }

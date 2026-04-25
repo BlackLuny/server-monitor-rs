@@ -214,10 +214,8 @@ fn package(
     std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     // Need the panel? Run pnpm build once up front (rust-embed bakes it in).
-    let needs_frontend = !skip_frontend
-        && selected
-            .iter()
-            .any(|s| s.bins.contains(&"monitor-panel"));
+    let needs_frontend =
+        !skip_frontend && selected.iter().any(|s| s.bins.contains(&"monitor-panel"));
     if needs_frontend {
         frontend_build()?;
     }

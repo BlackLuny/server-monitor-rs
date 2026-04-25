@@ -16,6 +16,7 @@ mod static_files;
 mod terminal_ws;
 mod terminals;
 mod totp;
+mod updates;
 mod users;
 mod ws;
 
@@ -109,6 +110,16 @@ pub fn router(state: AppState) -> Router {
             get(terminals::list_for_server),
         )
         .route("/api/recordings/:session_id", get(terminals::recording))
+        // ---- self-update orchestration (admin only) ----
+        .route("/api/updates/latest", get(updates::latest))
+        .route(
+            "/api/updates/rollouts",
+            get(updates::list).post(updates::create),
+        )
+        .route("/api/updates/rollouts/:id", get(updates::detail))
+        .route("/api/updates/rollouts/:id/pause", post(updates::pause))
+        .route("/api/updates/rollouts/:id/resume", post(updates::resume))
+        .route("/api/updates/rollouts/:id/abort", post(updates::abort))
         // ---- websocket ----
         .route("/ws/live", get(ws::handler))
         .route("/ws/terminal/:server_id", get(terminal_ws::handler))

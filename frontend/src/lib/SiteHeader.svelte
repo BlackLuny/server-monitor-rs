@@ -16,6 +16,7 @@
     { href: '/settings/groups', label: 'Groups', visibility: 'admin' },
     { href: '/settings/users', label: 'Users', visibility: 'admin' },
     { href: '/settings/security', label: 'Security', visibility: 'auth' },
+    { href: '/settings/updates', label: 'Updates', visibility: 'admin' },
     { href: '/settings/audit', label: 'Audit', visibility: 'admin' }
   ];
 

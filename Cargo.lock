@@ -1655,6 +1655,7 @@ dependencies = [
  "monitor-proto",
  "qrcode",
  "rand 0.8.6",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",

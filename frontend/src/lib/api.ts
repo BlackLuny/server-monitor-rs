@@ -426,6 +426,89 @@ export function listAgents(): Promise<AgentRow[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Updates / rollouts (admin only)
+// ---------------------------------------------------------------------------
+
+export interface ReleaseAsset {
+  name: string;
+  url: string;
+  size: number;
+  sha256: string;
+}
+
+export interface LatestRelease {
+  tag: string;
+  name: string | null;
+  html_url: string | null;
+  prerelease: boolean;
+  published_at: string;
+  fetched_at: string;
+  assets: ReleaseAsset[];
+}
+
+export interface RolloutSummary {
+  id: number;
+  version: string;
+  state: 'pending' | 'active' | 'paused' | 'completed' | 'aborted';
+  percent: number;
+  created_by: number | null;
+  created_at: string;
+  note: string | null;
+  assignments_total: number;
+  assignments_pending: number;
+  assignments_sent: number;
+  assignments_succeeded: number;
+  assignments_failed: number;
+}
+
+export interface AssignmentView {
+  agent_id: string;
+  display_name: string;
+  target: string;
+  state: 'pending' | 'sent' | 'succeeded' | 'failed';
+  last_status_message: string | null;
+  updated_at: string;
+}
+
+export interface RolloutView {
+  summary: RolloutSummary;
+  assignments: AssignmentView[];
+}
+
+export interface CreateRolloutInput {
+  version: string;
+  percent?: number;
+  agent_ids?: string[];
+  note?: string;
+}
+
+export function getLatestRelease(): Promise<LatestRelease | null> {
+  return getJson<LatestRelease | null>('/api/updates/latest');
+}
+
+export function listRollouts(): Promise<RolloutSummary[]> {
+  return getJson<RolloutSummary[]>('/api/updates/rollouts');
+}
+
+export function getRollout(id: number): Promise<RolloutView> {
+  return getJson<RolloutView>(`/api/updates/rollouts/${id}`);
+}
+
+export function createRollout(body: CreateRolloutInput): Promise<RolloutView> {
+  return postJson<RolloutView>('/api/updates/rollouts', body);
+}
+
+export function pauseRollout(id: number): Promise<void> {
+  return postNoContent(`/api/updates/rollouts/${id}/pause`, {});
+}
+export function resumeRollout(id: number): Promise<void> {
+  return postNoContent(`/api/updates/rollouts/${id}/resume`, {});
+}
+export function abortRollout(id: number): Promise<void> {
+  return postNoContent(`/api/updates/rollouts/${id}/abort`, {});
+}
+
+// ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 

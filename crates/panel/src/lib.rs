@@ -17,3 +17,4 @@ pub mod shutdown;
 pub mod state;
 pub mod telemetry;
 pub mod terminal;
+pub mod updates;
