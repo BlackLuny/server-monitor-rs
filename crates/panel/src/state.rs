@@ -12,6 +12,11 @@ pub struct AppState {
     pub pool: PgPool,
     pub hub: SessionHub,
     pub live: LiveBus,
+    /// Whether session cookies should carry the `Secure` attribute.
+    /// `false` is only correct for plain-HTTP local/dev deployments — the
+    /// default elsewhere is `true`. Tests don't care, so the bare `new`
+    /// constructor leaves this off; production wiring sets it explicitly.
+    pub cookies_secure: bool,
 }
 
 impl AppState {
@@ -21,6 +26,13 @@ impl AppState {
             pool,
             hub: SessionHub::new(),
             live: LiveBus::new(),
+            cookies_secure: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_cookies_secure(mut self, secure: bool) -> Self {
+        self.cookies_secure = secure;
+        self
     }
 }

@@ -40,7 +40,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let pool = db::connect_and_migrate(&cfg.database).await?;
-    let app_state = AppState::new(pool);
+    let app_state = AppState::new(pool).with_cookies_secure(!cfg.http.insecure_cookies);
+    if cfg.http.insecure_cookies {
+        tracing::warn!(
+            "MONITOR_HTTP__INSECURE_COOKIES is set: session cookies will not carry the Secure flag. \
+             Acceptable for plain-HTTP deployments, but every request travels in cleartext."
+        );
+    }
 
     let shutdown_rx = shutdown::install_handlers();
 

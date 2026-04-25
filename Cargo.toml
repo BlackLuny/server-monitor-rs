@@ -47,6 +47,7 @@ prost-types = "0.13"
 
 # HTTP server
 axum = { version = "0.7", features = ["ws", "macros"] }
+axum-extra = { version = "0.9", features = ["cookie"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "compression-full", "fs"] }
 hyper = "1"
@@ -84,6 +85,8 @@ jsonwebtoken = "9"
 rand = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
+totp-rs = { version = "5", default-features = false, features = ["otpauth", "gen_secret"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # System info (Agent)
 sysinfo = "0.32"

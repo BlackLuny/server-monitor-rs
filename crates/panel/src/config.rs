@@ -38,12 +38,19 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
     pub listen: SocketAddr,
+    /// Set to `true` only for plain-HTTP deployments where the panel sits
+    /// behind no TLS terminator. The default emits cookies with the
+    /// `Secure` attribute, which modern browsers refuse to store over
+    /// http://. Override with `MONITOR_HTTP__INSECURE_COOKIES=true`.
+    #[serde(default)]
+    pub insecure_cookies: bool,
 }
 
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             listen: "0.0.0.0:8080".parse().expect("valid default"),
+            insecure_cookies: false,
         }
     }
 }

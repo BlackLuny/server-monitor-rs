@@ -18,12 +18,17 @@
     Stat,
     StatusDot
   } from '$lib/primitives';
+  import { goto } from '$app/navigation';
   import {
+    adminCreateServer,
+    deleteServer,
     listServers,
     subscribeLive,
+    type CreatedServer,
     type LiveUpdate,
     type ServerRow
   } from '$lib/api';
+  import { authStore } from '$lib/auth.svelte';
   import { ageFromIso, bitsPerSec, percent, usagePct } from '$lib/format';
 
   // ----------------------------------------------------------------
@@ -48,12 +53,25 @@
   let liveUnsub: (() => void) | null = null;
   let agePoll: ReturnType<typeof setInterval> | null = null;
 
+  // Drives the "Add server" modal + the install-command reveal.
+  let showAddServer = $state(false);
+  let newServerName = $state('');
+  let creating = $state(false);
+  let createError = $state<string | null>(null);
+  let lastCreated = $state<CreatedServer | null>(null);
+
+  // Auth-derived view mode: when there is no logged-in user we ask the panel
+  // to filter for guests. The panel responds with hardware nulled out and
+  // hidden_from_guest rows dropped.
+  const guestMode = $derived(!authStore.state.user);
+  const isAdmin = $derived(authStore.state.user?.role === 'admin');
+
   // ----------------------------------------------------------------
   // data load + live merge
   // ----------------------------------------------------------------
   async function reload() {
     try {
-      const res = await listServers();
+      const res = await listServers({ guest: guestMode });
       servers = res.servers;
       lastUpdate = res.updated_at;
       // Seed rings from the latest sample so every card shows something
@@ -129,7 +147,7 @@
 
   onMount(() => {
     reload();
-    liveUnsub = subscribeLive(handleLive);
+    liveUnsub = subscribeLive(handleLive, { guest: guestMode });
     agePoll = setInterval(() => (nowTick = Date.now()), 1000);
   });
 
@@ -137,6 +155,44 @@
     liveUnsub?.();
     if (agePoll) clearInterval(agePoll);
   });
+
+  // Re-subscribe when the auth state flips (login from /login lands back
+  // here without a remount, so the WS would otherwise keep the guest scope).
+  $effect(() => {
+    void authStore.state.user;
+    liveUnsub?.();
+    liveUnsub = subscribeLive(handleLive, { guest: guestMode });
+    reload();
+  });
+
+  async function handleCreate() {
+    createError = null;
+    if (!newServerName.trim()) {
+      createError = 'name required';
+      return;
+    }
+    creating = true;
+    try {
+      const created = await adminCreateServer({ display_name: newServerName.trim() });
+      lastCreated = created;
+      newServerName = '';
+      await reload();
+    } catch (err) {
+      createError = err instanceof Error ? err.message : String(err);
+    } finally {
+      creating = false;
+    }
+  }
+
+  async function handleDelete(id: number, name: string) {
+    if (!confirm(`Remove "${name}" from the panel? This does not stop the agent.`)) return;
+    try {
+      await deleteServer(id);
+      await reload();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   // ----------------------------------------------------------------
   // grouping + filtering
@@ -218,6 +274,20 @@
         {#each (s.tags ?? []).slice(0, 2) as tag}
           <Badge tone="neutral">{tag}</Badge>
         {/each}
+        {#if isAdmin}
+          <button
+            type="button"
+            onclick={(ev) => {
+              ev.preventDefault();
+              ev.stopPropagation();
+              handleDelete(s.id, s.display_name);
+            }}
+            class="ml-1 font-mono text-2xs uppercase tracking-[0.12em] text-fg-quaternary hover:text-error"
+            title="remove from panel"
+          >
+            ✕
+          </button>
+        {/if}
       </div>
     </div>
 
@@ -268,14 +338,13 @@
   </Panel>
 {/snippet}
 
-<div class="min-h-screen">
-  <!-- ── top bar ── -->
-  <header class="border-b border-border">
-    <div class="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-3">
-      <div class="flex items-baseline gap-3">
-        <span class="font-mono text-xs uppercase tracking-wider text-fg-tertiary">svrmon</span>
-        <h1 class="text-md font-medium tracking-tight">overview</h1>
-      </div>
+<div>
+  <!-- ── page-level toolbar (sits below the global SiteHeader) ── -->
+  <div class="border-b border-border">
+    <div
+      class="mx-auto flex max-w-screen-2xl items-center justify-between gap-4 px-6 py-3"
+    >
+      <h1 class="text-md font-medium tracking-tight">overview</h1>
       <div class="flex items-center gap-3">
         <input
           type="text"
@@ -288,11 +357,42 @@
           <span class="text-fg-quaternary">/</span>
           {totals.total} online
         </span>
+        {#if isAdmin}
+          <button
+            type="button"
+            onclick={() => {
+              showAddServer = true;
+              lastCreated = null;
+            }}
+            class="rounded border px-3 py-1 font-mono text-2xs uppercase tracking-[0.14em] transition-colors hover:bg-elev-2"
+            style:border-color="var(--border-accent)"
+            style:color="var(--border-accent)"
+          >
+            + add server
+          </button>
+        {/if}
       </div>
     </div>
-  </header>
+  </div>
 
-  <main class="mx-auto max-w-7xl px-6 py-6">
+  {#if guestMode && !authStore.state.guestEnabled}
+    <div class="mx-auto max-w-md px-6 py-20 text-center">
+      <h2 class="text-lg font-medium text-fg">Guest access is disabled</h2>
+      <p class="mt-2 text-sm text-fg-secondary">
+        Sign in to view the dashboard.
+      </p>
+      <button
+        type="button"
+        onclick={() => goto('/login')}
+        class="mt-4 rounded border px-4 py-2 font-mono text-2xs uppercase tracking-[0.14em] transition-colors hover:bg-elev-2"
+        style:border-color="var(--border-accent)"
+        style:color="var(--border-accent)"
+      >
+        sign in
+      </button>
+    </div>
+  {:else}
+  <main class="mx-auto max-w-screen-2xl px-6 py-6">
     {#if error}
       <div
         class="rounded border px-4 py-3 text-sm text-error"
@@ -320,4 +420,96 @@
       {/each}
     {/if}
   </main>
+  {/if}
+
+  {#if showAddServer}
+    <!-- Admin "add server" modal — surfaces the install command on success. -->
+    <button
+      type="button"
+      onclick={() => (showAddServer = false)}
+      class="fixed inset-0 z-40 cursor-default bg-black/60"
+      aria-label="close"
+    ></button>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add server"
+      class="fixed left-1/2 top-1/2 z-50 w-[460px] -translate-x-1/2 -translate-y-1/2 rounded border border-border bg-elev-1 p-6"
+    >
+      {#if lastCreated}
+        <div class="mb-3 font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
+          install command — copy it onto the host
+        </div>
+        <pre
+          class="mb-4 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded border border-border bg-recess p-3 font-mono text-xs text-fg"
+        >{lastCreated.install_command}</pre>
+        <div class="flex justify-end gap-2">
+          <button
+            type="button"
+            onclick={() => navigator.clipboard.writeText(lastCreated!.install_command)}
+            class="rounded border border-border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-fg-secondary hover:bg-elev-2"
+          >
+            copy
+          </button>
+          <button
+            type="button"
+            onclick={() => {
+              showAddServer = false;
+              lastCreated = null;
+            }}
+            class="rounded border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.14em]"
+            style:border-color="var(--border-accent)"
+            style:color="var(--border-accent)"
+          >
+            done
+          </button>
+        </div>
+      {:else}
+        <div class="mb-1 font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
+          new server
+        </div>
+        <h2 class="mb-4 text-md font-medium text-fg">Register a host</h2>
+        <label class="block">
+          <span
+            class="mb-1.5 block font-mono text-2xs uppercase tracking-[0.12em] text-fg-tertiary"
+            >display name</span
+          >
+          <input
+            type="text"
+            bind:value={newServerName}
+            disabled={creating}
+            class="block w-full rounded border border-border bg-recess px-3 py-2 font-mono text-sm text-fg focus:border-border-accent"
+            placeholder="prod-web-01"
+          />
+        </label>
+        {#if createError}
+          <div
+            class="mt-3 rounded border border-border bg-recess px-3 py-2 font-mono text-xs"
+            style="color: var(--status-error)"
+          >
+            {createError}
+          </div>
+        {/if}
+        <div class="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onclick={() => (showAddServer = false)}
+            class="rounded border border-border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-fg-secondary hover:bg-elev-2"
+          >
+            cancel
+          </button>
+          <button
+            type="button"
+            disabled={creating || !newServerName.trim()}
+            onclick={handleCreate}
+            class="rounded border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.14em] disabled:opacity-40"
+            style:border-color="var(--border-accent)"
+            style:color="var(--border-accent)"
+          >
+            {creating ? 'creating…' : 'create'}
+          </button>
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>

@@ -9,8 +9,8 @@
 //! whenever the caller is not logged in.
 
 use axum::{
-    extract::{Query, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -18,7 +18,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::{settings, state::AppState};
+use crate::{
+    auth::{self, audit, AdminUser},
+    settings,
+    state::AppState,
+};
 
 // ---------------------------------------------------------------------------
 // GET /api/servers
@@ -244,12 +248,22 @@ impl ServerRowDb {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/servers  (dev-only until M3)
+// POST /api/servers  — admin-only
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct CreateServer {
     pub display_name: String,
+    #[serde(default)]
+    pub group_id: Option<i64>,
+    #[serde(default)]
+    pub tags: Option<Value>,
+    #[serde(default)]
+    pub hidden_from_guest: Option<bool>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub flag_emoji: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -263,6 +277,8 @@ pub struct CreatedServer {
 
 pub async fn create(
     State(state): State<AppState>,
+    AdminUser(session): AdminUser,
+    headers: HeaderMap,
     Json(body): Json<CreateServer>,
 ) -> impl IntoResponse {
     let display = body.display_name.trim().to_owned();
@@ -297,12 +313,19 @@ pub async fn create(
 
     let join_token = monitor_common::token::generate();
     let row = sqlx::query_as::<_, (i64, uuid::Uuid)>(
-        r#"INSERT INTO servers (display_name, join_token)
-           VALUES ($1, $2)
+        r#"INSERT INTO servers
+              (display_name, join_token, group_id, tags, hidden_from_guest, location, flag_emoji)
+           VALUES
+              ($1, $2, $3, COALESCE($4, '[]'::jsonb), COALESCE($5, FALSE), $6, $7)
            RETURNING id, agent_id"#,
     )
     .bind(&display)
     .bind(&join_token)
+    .bind(body.group_id)
+    .bind(body.tags.as_ref())
+    .bind(body.hidden_from_guest)
+    .bind(body.location.as_deref())
+    .bind(body.flag_emoji.as_deref())
     .fetch_one(&state.pool)
     .await;
 
@@ -319,6 +342,16 @@ pub async fn create(
             --endpoint={endpoint} --token={join_token}"
     );
 
+    let meta = auth::session_meta(&headers);
+    audit::record(
+        &state.pool,
+        Some(session.user_id),
+        "server.created",
+        Some(&display),
+        &meta,
+    )
+    .await;
+
     (
         StatusCode::CREATED,
         Json(CreatedServer {
@@ -327,6 +360,160 @@ pub async fn create(
             display_name: display,
             join_token,
             install_command,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/servers/:id   — partial update of mutable metadata
+// DELETE /api/servers/:id
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct UpdateServer {
+    pub display_name: Option<String>,
+    pub group_id: Option<Option<i64>>,
+    pub tags: Option<Value>,
+    pub hidden_from_guest: Option<bool>,
+    pub location: Option<Option<String>>,
+    pub flag_emoji: Option<Option<String>>,
+    pub terminal_enabled: Option<bool>,
+    pub ssh_recording: Option<String>,
+    pub order_idx: Option<i32>,
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    AdminUser(session): AdminUser,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateServer>,
+) -> Result<Json<UpdatedServer>, axum::response::Response> {
+    if let Some(rec) = body.ssh_recording.as_deref() {
+        if !matches!(rec, "default" | "on" | "off") {
+            return Err(bad(
+                "invalid_ssh_recording",
+                "ssh_recording must be one of: default, on, off",
+            ));
+        }
+    }
+    if let Some(name) = body.display_name.as_deref() {
+        if name.trim().is_empty() {
+            return Err(bad(
+                "display_name_required",
+                "display_name must not be empty",
+            ));
+        }
+    }
+
+    // For Option<Option<T>>: outer None = "leave alone", outer Some(None) =
+    // "clear", outer Some(Some(v)) = "set". COALESCE only handles the first
+    // two; for explicit clears we must pass NULL. We bind a sentinel "null
+    // wins" boolean to disambiguate.
+    //
+    // To keep this query single-statement and readable, we inline COALESCE
+    // for the always-overwritable columns and use CASE expressions for the
+    // nullable ones.
+    let row: Option<UpdatedServer> = sqlx::query_as(
+        r#"UPDATE servers SET
+              display_name      = COALESCE($2, display_name),
+              tags              = COALESCE($3, tags),
+              hidden_from_guest = COALESCE($4, hidden_from_guest),
+              terminal_enabled  = COALESCE($5, terminal_enabled),
+              ssh_recording     = COALESCE($6, ssh_recording),
+              order_idx         = COALESCE($7, order_idx),
+              group_id          = CASE WHEN $8 THEN $9 ELSE group_id END,
+              location          = CASE WHEN $10 THEN $11 ELSE location END,
+              flag_emoji        = CASE WHEN $12 THEN $13 ELSE flag_emoji END
+            WHERE id = $1
+            RETURNING id, display_name"#,
+    )
+    .bind(id)
+    .bind(body.display_name.as_deref().map(str::trim))
+    .bind(body.tags.as_ref())
+    .bind(body.hidden_from_guest)
+    .bind(body.terminal_enabled)
+    .bind(body.ssh_recording.as_deref())
+    .bind(body.order_idx)
+    .bind(body.group_id.is_some())
+    .bind(body.group_id.flatten())
+    .bind(body.location.is_some())
+    .bind(body.location.as_ref().and_then(|o| o.as_deref()))
+    .bind(body.flag_emoji.is_some())
+    .bind(body.flag_emoji.as_ref().and_then(|o| o.as_deref()))
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|err| {
+        tracing::error!(%err, "servers: update");
+        internal_error()
+    })?;
+    let row = row.ok_or_else(not_found)?;
+
+    let meta = auth::session_meta(&headers);
+    audit::record(
+        &state.pool,
+        Some(session.user_id),
+        "server.updated",
+        Some(&row.display_name),
+        &meta,
+    )
+    .await;
+    Ok(Json(row))
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct UpdatedServer {
+    pub id: i64,
+    pub display_name: String,
+}
+
+pub async fn delete_one(
+    State(state): State<AppState>,
+    AdminUser(session): AdminUser,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<StatusCode, axum::response::Response> {
+    let removed: Option<(String,)> =
+        sqlx::query_as("DELETE FROM servers WHERE id = $1 RETURNING display_name")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|err| {
+                tracing::error!(%err, "servers: delete");
+                internal_error()
+            })?;
+    let (name,) = removed.ok_or_else(not_found)?;
+
+    let meta = auth::session_meta(&headers);
+    audit::record(
+        &state.pool,
+        Some(session.user_id),
+        "server.deleted",
+        Some(&name),
+        &meta,
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn bad(code: &'static str, message: &'static str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorBody {
+            code,
+            message: message.to_owned(),
+        }),
+    )
+        .into_response()
+}
+
+fn not_found() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorBody {
+            code: "not_found",
+            message: "server not found".into(),
         }),
     )
         .into_response()

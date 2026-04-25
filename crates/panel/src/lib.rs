@@ -4,6 +4,7 @@
 //! exposed here so integration tests and xtask commands can reuse it.
 
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod grpc;

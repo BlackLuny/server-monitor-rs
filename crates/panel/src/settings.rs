@@ -49,3 +49,9 @@ pub async fn agent_endpoint(pool: &PgPool) -> Result<Option<String>, SettingsErr
         }
     }))
 }
+
+/// Whether guests (unauthenticated callers) may inspect the dashboard.
+/// Defaults to `true` when unset.
+pub async fn guest_enabled(pool: &PgPool) -> Result<bool, SettingsError> {
+    Ok(get::<bool>(pool, "guest_enabled").await?.unwrap_or(true))
+}

@@ -94,9 +94,309 @@ export interface LiveUpdate {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(path, { headers: { accept: 'application/json' } });
+  const res = await fetch(path, {
+    headers: { accept: 'application/json' },
+    credentials: 'same-origin'
+  });
   if (!res.ok) throw new Error(`${path}: ${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
+}
+
+// ---------------------------------------------------------------------------
+// Setup wizard
+// ---------------------------------------------------------------------------
+
+export interface SetupStatus {
+  initialized: boolean;
+}
+
+export interface SetupResult {
+  user_id: number;
+  username: string;
+  role: string;
+}
+
+export interface ApiErrorBody {
+  code: string;
+  message: string;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
+export function getSetupStatus(): Promise<SetupStatus> {
+  return getJson<SetupStatus>('/api/setup/status');
+}
+
+export async function runSetup(username: string, password: string): Promise<SetupResult> {
+  return postJson<SetupResult>('/api/setup', { username, password });
+}
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+export interface User {
+  user_id: number;
+  username: string;
+  role: string;
+  totp_enabled: boolean;
+}
+
+export async function whoami(): Promise<User | null> {
+  const res = await fetch('/api/auth/me', {
+    headers: { accept: 'application/json' },
+    credentials: 'same-origin'
+  });
+  if (res.status === 401) return null;
+  if (!res.ok) throw new Error(`/api/auth/me: ${res.status}`);
+  return (await res.json()) as User;
+}
+
+export async function login(
+  username: string,
+  password: string,
+  totpCode?: string
+): Promise<User> {
+  return postJson<User>('/api/auth/login', {
+    username,
+    password,
+    totp_code: totpCode ?? null
+  });
+}
+
+export async function logout(): Promise<void> {
+  const res = await fetch('/api/auth/logout', {
+    method: 'POST',
+    credentials: 'same-origin',
+    // Send Origin so the CSRF middleware accepts the call when the SPA is
+    // hosted under a non-default port — fetch already does this on its own
+    // for cross-fetch, but spelling it out keeps tests + curl interchange
+    // identical.
+    headers: { origin: location.origin }
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`/api/auth/logout: ${res.status}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2FA management
+// ---------------------------------------------------------------------------
+
+export interface TotpEnrollResponse {
+  secret: string;
+  otpauth_url: string;
+  qr_svg_data_url: string;
+}
+
+export interface TotpConfirmResponse {
+  totp_enabled: boolean;
+  backup_codes: string[];
+}
+
+export async function totpEnroll(): Promise<TotpEnrollResponse> {
+  return postJson<TotpEnrollResponse>('/api/auth/totp/enroll', {});
+}
+
+export async function totpConfirm(code: string): Promise<TotpConfirmResponse> {
+  return postJson<TotpConfirmResponse>('/api/auth/totp/confirm', { code });
+}
+
+export async function totpDisable(password: string): Promise<void> {
+  await postNoContent('/api/auth/totp/disable', { password });
+}
+
+export async function totpRegenerateBackup(password: string): Promise<{ backup_codes: string[] }> {
+  return postJson<{ backup_codes: string[] }>('/api/auth/totp/regenerate-backup', { password });
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+export interface SettingRow {
+  key: string;
+  value: unknown;
+}
+
+export function listSettings(): Promise<SettingRow[]> {
+  return getJson<SettingRow[]>('/api/settings');
+}
+
+export async function putSetting<T>(key: string, value: T): Promise<SettingRow> {
+  return putJson<SettingRow>(`/api/settings/${encodeURIComponent(key)}`, { value });
+}
+
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+export interface GroupRow {
+  id: number;
+  name: string;
+  order_idx: number;
+  description: string | null;
+  color: string | null;
+}
+
+export function listGroups(): Promise<GroupRow[]> {
+  return getJson<GroupRow[]>('/api/groups');
+}
+export function createGroup(body: {
+  name: string;
+  order_idx?: number;
+  description?: string | null;
+  color?: string | null;
+}): Promise<GroupRow> {
+  return postJson<GroupRow>('/api/groups', body);
+}
+export function updateGroup(id: number, body: Partial<GroupRow>): Promise<GroupRow> {
+  return patchJson<GroupRow>(`/api/groups/${id}`, body);
+}
+export function deleteGroup(id: number): Promise<void> {
+  return deleteNoBody(`/api/groups/${id}`);
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  role: string;
+  totp_enabled: boolean;
+  created_at: string;
+}
+
+export function listUsers(): Promise<AdminUser[]> {
+  return getJson<AdminUser[]>('/api/users');
+}
+export function createUser(username: string, password: string): Promise<AdminUser> {
+  return postJson<AdminUser>('/api/users', { username, password });
+}
+export function deleteUser(id: number): Promise<void> {
+  return deleteNoBody(`/api/users/${id}`);
+}
+export function resetUserPassword(id: number, password: string): Promise<void> {
+  return putNoContent(`/api/users/${id}/password`, { password });
+}
+export function changeOwnPassword(current: string, fresh: string): Promise<void> {
+  return putNoContent('/api/auth/password', {
+    current_password: current,
+    new_password: fresh
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Servers (admin actions)
+// ---------------------------------------------------------------------------
+
+export interface CreatedServer {
+  id: number;
+  agent_id: string;
+  display_name: string;
+  join_token: string;
+  install_command: string;
+}
+
+export function adminCreateServer(body: {
+  display_name: string;
+  group_id?: number | null;
+  hidden_from_guest?: boolean;
+  location?: string | null;
+  flag_emoji?: string | null;
+}): Promise<CreatedServer> {
+  return postJson<CreatedServer>('/api/servers', body);
+}
+
+export function updateServer(id: number, body: Record<string, unknown>): Promise<unknown> {
+  return patchJson<unknown>(`/api/servers/${id}`, body);
+}
+
+export function deleteServer(id: number): Promise<void> {
+  return deleteNoBody(`/api/servers/${id}`);
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+export interface AuditRow {
+  id: number;
+  user_id: number | null;
+  username: string | null;
+  action: string;
+  target: string | null;
+  ip: string | null;
+  user_agent: string | null;
+  ts: string;
+}
+
+export function listAudit(limit = 100): Promise<AuditRow[]> {
+  return getJson<AuditRow[]>(`/api/audit?limit=${limit}`);
+}
+
+// ---------------------------------------------------------------------------
+// internals
+// ---------------------------------------------------------------------------
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  return fetchJson<T>('POST', path, body);
+}
+async function patchJson<T>(path: string, body: unknown): Promise<T> {
+  return fetchJson<T>('PATCH', path, body);
+}
+async function putJson<T>(path: string, body: unknown): Promise<T> {
+  return fetchJson<T>('PUT', path, body);
+}
+async function fetchJson<T>(method: string, path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      origin: location.origin
+    },
+    credentials: 'same-origin',
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as ApiErrorBody | null;
+    throw new ApiError(res.status, err?.code ?? 'unknown', err?.message ?? res.statusText);
+  }
+  return (await res.json()) as T;
+}
+async function postNoContent(path: string, body: unknown): Promise<void> {
+  return fetchNoContent('POST', path, body);
+}
+async function putNoContent(path: string, body: unknown): Promise<void> {
+  return fetchNoContent('PUT', path, body);
+}
+async function deleteNoBody(path: string): Promise<void> {
+  return fetchNoContent('DELETE', path, undefined);
+}
+async function fetchNoContent(method: string, path: string, body: unknown): Promise<void> {
+  const res = await fetch(path, {
+    method,
+    headers: body
+      ? { 'content-type': 'application/json', origin: location.origin }
+      : { origin: location.origin },
+    credentials: 'same-origin',
+    body: body !== undefined ? JSON.stringify(body) : undefined
+  });
+  if (!res.ok && res.status !== 204) {
+    const err = (await res.json().catch(() => null)) as ApiErrorBody | null;
+    throw new ApiError(res.status, err?.code ?? 'unknown', err?.message ?? res.statusText);
+  }
 }
 
 export function listServers(opts: { guest?: boolean } = {}): Promise<ServerList> {
