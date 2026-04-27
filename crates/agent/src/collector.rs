@@ -88,10 +88,14 @@ impl Collector {
         let load = System::load_average();
 
         // ----- Disks -----
+        // Skip pseudo filesystems (tmpfs / devtmpfs / overlay / …) and
+        // dedupe by backing device, otherwise the totals balloon — see
+        // `hardware::physical_disks` for the same trap on the Register
+        // side.
         let mut disks_detail: Vec<DiskUsage> = Vec::with_capacity(self.disks.list().len());
         let mut disk_used_total: u64 = 0;
         let mut disk_total_total: u64 = 0;
-        for d in self.disks.list() {
+        for d in crate::hardware::physical_disks(&self.disks) {
             let total = d.total_space();
             let avail = d.available_space();
             let used = total.saturating_sub(avail);
