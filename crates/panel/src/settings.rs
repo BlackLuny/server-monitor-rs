@@ -53,10 +53,7 @@ pub async fn panel_public_url(pool: &PgPool) -> Result<Option<String>, SettingsE
         .filter(|s| !s.is_empty()))
 }
 
-async fn trimmed_string(
-    pool: &PgPool,
-    key: &'static str,
-) -> Result<Option<String>, SettingsError> {
+async fn trimmed_string(pool: &PgPool, key: &'static str) -> Result<Option<String>, SettingsError> {
     let val: Option<String> = get(pool, key).await?;
     Ok(val.and_then(|s| {
         let t = s.trim().to_owned();

@@ -174,15 +174,13 @@ pub async fn server_sparklines(
     use std::collections::HashMap;
     let mut by_server: HashMap<i64, SparklineRow> = HashMap::new();
     for (server_id, cpu_pct, mem_used, mem_total, net_in_bps, net_out_bps) in rows {
-        let entry = by_server
-            .entry(server_id)
-            .or_insert_with(|| SparklineRow {
-                server_id,
-                cpu_pct: Vec::new(),
-                mem_pct: Vec::new(),
-                net_in_bps: Vec::new(),
-                net_out_bps: Vec::new(),
-            });
+        let entry = by_server.entry(server_id).or_insert_with(|| SparklineRow {
+            server_id,
+            cpu_pct: Vec::new(),
+            mem_pct: Vec::new(),
+            net_in_bps: Vec::new(),
+            net_out_bps: Vec::new(),
+        });
         let mem_pct = if mem_total > 0 {
             (mem_used as f64 * 100.0) / mem_total as f64
         } else {

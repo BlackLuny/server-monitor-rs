@@ -10,6 +10,55 @@ supervisor moving in lockstep.
 Nothing yet — track in-flight work in
 [the milestone roadmap](../README.md#roadmap) until the next tag.
 
+## [0.2.1] — 2026-04-27
+
+Bug-fix release. Schema unchanged from `v0.2.0` apart from the new
+`panel_public_url` setting (auto-seeded by the existing migration
+folder); all existing installs upgrade with no manual steps. Agents
+should self-update via the panel rollout flow once the panel is on
+`v0.2.1` and the poller has cached the new release.
+
+### Add-server flow
+- Split `agent_endpoint` (gRPC dial URL) from `panel_public_url` (HTTP
+  base for fetching `install-agent.sh`). The two were conflated, so the
+  panel-generated curl command pointed at the gRPC port and got
+  `HTTP/0.9 when not allowed`.
+- Embed `install-agent.sh` and `install-agent.ps1` in the panel binary
+  and serve them at `/install-agent.{sh,ps1}`. Previously no route
+  existed and curl fell through to the SPA `index.html`.
+- Generate `sudo bash -s --` (not `sh`); the script uses bash-isms and
+  Debian's `/bin/sh` is dash.
+- Inject `--release-url` and `--version` derived from `update_repo` +
+  cached `latest_release` so the install can download tarballs without
+  the operator passing them by hand.
+- New `GET /api/servers/:id/install` and `POST /api/servers/:id/install/rotate`
+  let admins re-view (or rotate, with consequences) the install command
+  after the create modal closes. Surfaced as a per-row `install` action
+  on `/settings/servers`.
+
+### Install script (`deploy/install-agent.sh`)
+- Add `${CONFIG_DIR}` to systemd `ReadWritePaths`. Without it the
+  agent's post-Register `cfg.save()` failed with EROFS, the panel
+  committed `server_token` server-side but the agent never persisted it,
+  and every restart looped on `invalid or already-used join_token`.
+- `chown ${CONFIG_DIR}` and `agent.yaml` to `USER_RUNAS` so the agent
+  user can rewrite its own credentials (atomic `.tmp` + rename needs
+  write on the directory).
+- Force `systemctl restart` after `daemon-reload`. `enable --now` is a
+  no-op for an already-running service, so re-runs never picked up the
+  newly-written `agent.yaml`.
+
+See [issue #1](https://github.com/BlackLuny/server-monitor-rs/issues/1)
+for the longer-term plan to move agent runtime credentials out of `/etc`
+entirely.
+
+### Agent metrics
+- `disk_bytes` (Register) and `disk_total` (per-tick) now skip pseudo
+  filesystems (`tmpfs`, `devtmpfs`, `overlay`, …) and dedupe by backing
+  device. Previously the same physical disk was counted once per mount
+  entry (cloud VMs expose `/dev/vda{,1,14,15}` plus several tmpfs); a
+  20 GB host showed up as 97.7 GB.
+
 ## [0.2.0] — 2026-04-25
 
 Builds on `v0.1.0` with the four follow-ups that close the M7 loop. Schema
