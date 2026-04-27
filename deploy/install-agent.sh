@@ -4,7 +4,7 @@
 #
 # Modes:
 #   - Interactive (run from a tty): prompts for what's missing.
-#   - One-liner:    curl -fsSL <url>/install-agent.sh | sudo sh -s -- \
+#   - One-liner:    curl -fsSL <url>/install-agent.sh | sudo bash -s -- \
 #                       --endpoint=https://panel.example.com/grpc \
 #                       --token=<join-token>
 #   - Local binary: --local-binary /path/to/monitor-agent  (skips download)
@@ -73,7 +73,7 @@ Flow:
   --dry-run               Print actions without doing them.
 
 Examples:
-  curl -fsSL https://example/install-agent.sh | sudo sh -s -- \\
+  curl -fsSL https://example/install-agent.sh | sudo bash -s -- \\
        --endpoint=https://panel.example.com/grpc --token=abcd1234
 
   sudo ./install-agent.sh --local-binary ./monitor-agent \\
@@ -308,9 +308,17 @@ run env MONITOR_AGENT_CONFIG="$AGENT_CONFIG" "$INSTALL_DIR/monitor-agent" \
     configure --endpoint "$ENDPOINT" --token "$TOKEN" --heartbeat "$HEARTBEAT"
 
 if [[ $DRY_RUN -eq 0 ]]; then
+    # The agent rewrites its own config after first Register (to persist
+    # server_token). Atomic save = write `<file>.tmp` then rename, which
+    # needs write permission on the *directory* and the *file*. Owning
+    # both as USER_RUNAS is the simplest policy that makes that work
+    # without granting world-write. See issue #1 for the longer-term plan
+    # to move runtime credentials out of /etc entirely.
     chmod 0640 "$AGENT_CONFIG"
     if [[ $OS = linux ]]; then
-        chown root:"$USER_RUNAS" "$AGENT_CONFIG" 2>/dev/null || true
+        chown "$USER_RUNAS:$USER_RUNAS" "$AGENT_CONFIG" 2>/dev/null || true
+        chown "$USER_RUNAS:$USER_RUNAS" "$CONFIG_DIR" 2>/dev/null || true
+        chmod 0750 "$CONFIG_DIR" 2>/dev/null || true
     fi
 fi
 
@@ -364,11 +372,16 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 # Hardening — recordings + state need write access; everything else is read-only.
+# CONFIG_DIR has to be writable too: after the first successful Register the
+# agent persists the returned server_token back to agent.yaml. Without this
+# the write fails with EROFS, the panel-side DB is updated but the agent
+# can't save the new credential, and every restart loops on
+# "invalid or already-used join_token".
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=${DATA_DIR}
+ReadWritePaths=${DATA_DIR} ${CONFIG_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -469,7 +482,13 @@ else
         systemd)
             write_systemd_unit
             run systemctl daemon-reload
-            run systemctl enable --now "${SERVICE_NAME}.service"
+            run systemctl enable "${SERVICE_NAME}.service"
+            # `enable --now` is a no-op for already-running services. On a
+            # re-run that's exactly the wrong thing — the daemon stays on
+            # the previous agent.yaml (cached in memory) and never sees the
+            # freshly-rewritten join_token. Force a restart so re-installs
+            # actually pick up new credentials / endpoint changes.
+            run systemctl restart "${SERVICE_NAME}.service"
             ;;
         openrc)
             write_openrc_unit

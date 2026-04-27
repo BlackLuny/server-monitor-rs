@@ -39,7 +39,25 @@ pub async fn get<T: DeserializeOwned>(
 /// Fetch the configured agent endpoint (trimmed). Returns `None` when unset or
 /// when the value is empty — callers should treat both as "not configured".
 pub async fn agent_endpoint(pool: &PgPool) -> Result<Option<String>, SettingsError> {
-    let val: Option<String> = get(pool, "agent_endpoint").await?;
+    trimmed_string(pool, "agent_endpoint").await
+}
+
+/// Public HTTP base for the panel — used to build URLs that browsers and
+/// `curl` need to fetch from (notably `install-agent.sh`). Distinct from
+/// `agent_endpoint`, which is the gRPC dial URL agents use. Trailing slashes
+/// are stripped so callers can concatenate `/install-agent.sh` directly.
+pub async fn panel_public_url(pool: &PgPool) -> Result<Option<String>, SettingsError> {
+    Ok(trimmed_string(pool, "panel_public_url")
+        .await?
+        .map(|s| s.trim_end_matches('/').to_owned())
+        .filter(|s| !s.is_empty()))
+}
+
+async fn trimmed_string(
+    pool: &PgPool,
+    key: &'static str,
+) -> Result<Option<String>, SettingsError> {
+    let val: Option<String> = get(pool, key).await?;
     Ok(val.and_then(|s| {
         let t = s.trim().to_owned();
         if t.is_empty() {

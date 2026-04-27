@@ -1,8 +1,9 @@
 //! Global KV settings + audit-log read-model.
 //!
 //! The `settings` table backs the admin-configurable options: `site_name`,
-//! `guest_enabled`, `agent_endpoint`, `ssh_recording_enabled`. Values are
-//! JSONB so future options can grow richer structures without a migration.
+//! `guest_enabled`, `agent_endpoint`, `panel_public_url`,
+//! `ssh_recording_enabled`. Values are JSONB so future options can grow
+//! richer structures without a migration.
 //!
 //! A list view of `audit_log` lives here too because it's admin-only and
 //! shares a conceptual lane with settings (things only admins inspect).
@@ -100,13 +101,17 @@ pub async fn put_one(
 fn is_allowed_key(k: &str) -> bool {
     matches!(
         k,
-        "site_name" | "guest_enabled" | "agent_endpoint" | "ssh_recording_enabled"
+        "site_name"
+            | "guest_enabled"
+            | "agent_endpoint"
+            | "panel_public_url"
+            | "ssh_recording_enabled"
     )
 }
 
 fn validate(key: &str, value: &Value) -> Result<(), &'static str> {
     match key {
-        "site_name" | "agent_endpoint" => {
+        "site_name" | "agent_endpoint" | "panel_public_url" => {
             if value.is_string() {
                 Ok(())
             } else {

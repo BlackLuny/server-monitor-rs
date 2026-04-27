@@ -101,7 +101,12 @@ async function getJson<T>(path: string): Promise<T> {
     headers: { accept: 'application/json' },
     credentials: 'same-origin'
   });
-  if (!res.ok) throw new Error(`${path}: ${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // Try to surface a structured ApiError so callers can branch on `code`.
+    // Falls back to a plain message when the server responded with non-JSON.
+    const err = (await res.json().catch(() => null)) as ApiErrorBody | null;
+    throw new ApiError(res.status, err?.code ?? 'unknown', err?.message ?? res.statusText);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -311,6 +316,13 @@ export interface CreatedServer {
   install_command: string;
 }
 
+/** Returned by GET /api/servers/:id/install and rotate. Same shape as
+ *  CreatedServer plus a `registered` flag — lets the UI tell the operator
+ *  whether rotating will disconnect a live agent. */
+export interface InstallInfo extends CreatedServer {
+  registered: boolean;
+}
+
 export function adminCreateServer(body: {
   display_name: string;
   group_id?: number | null;
@@ -327,6 +339,14 @@ export function updateServer(id: number, body: Record<string, unknown>): Promise
 
 export function deleteServer(id: number): Promise<void> {
   return deleteNoBody(`/api/servers/${id}`);
+}
+
+export function getServerInstall(id: number): Promise<InstallInfo> {
+  return getJson<InstallInfo>(`/api/servers/${id}/install`);
+}
+
+export function rotateServerInstall(id: number): Promise<InstallInfo> {
+  return postJson<InstallInfo>(`/api/servers/${id}/install/rotate`, {});
 }
 
 // ---------------------------------------------------------------------------

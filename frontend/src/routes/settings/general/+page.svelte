@@ -28,8 +28,16 @@
     },
     {
       key: 'agent_endpoint',
-      label: 'Agent endpoint URL',
-      help: 'Public address agents dial into. Required before any server can be added.',
+      label: 'Agent endpoint URL (gRPC)',
+      help:
+        'gRPC URL agents dial into — e.g. http://panel.example.com:9090 or https://panel.example.com/grpc. Required before any server can be added.',
+      kind: 'string'
+    },
+    {
+      key: 'panel_public_url',
+      label: 'Panel public URL (HTTP)',
+      help:
+        'HTTP base used in the install one-liner to fetch install-agent.sh — e.g. http://panel.example.com:8080 or https://panel.example.com. Falls back to the agent endpoint when blank.',
       kind: 'string'
     },
     {

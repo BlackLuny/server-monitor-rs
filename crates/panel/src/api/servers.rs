@@ -304,9 +304,9 @@ pub async fn create(
             .into_response();
     }
 
-    let endpoint = match settings::agent_endpoint(&state.pool).await {
-        Ok(Some(ep)) => ep,
-        Ok(None) => {
+    let (endpoint, public_url) = match install_urls(&state.pool).await {
+        Ok(pair) => pair,
+        Err(InstallUrlError::EndpointMissing) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorBody {
@@ -316,11 +316,9 @@ pub async fn create(
             )
                 .into_response();
         }
-        Err(err) => {
-            tracing::error!(%err, "reading agent_endpoint");
-            return internal_error();
-        }
+        Err(InstallUrlError::Db) => return internal_error(),
     };
+    let release = agent_release_info(&state.pool).await;
 
     let join_token = monitor_common::token::generate();
     let row = sqlx::query_as::<_, (i64, uuid::Uuid)>(
@@ -348,10 +346,8 @@ pub async fn create(
         }
     };
 
-    let install_command = format!(
-        "curl -fsSL {endpoint}/install-agent.sh | sudo sh -s -- \
-            --endpoint={endpoint} --token={join_token}"
-    );
+    let install_command =
+        format_install_command(&public_url, &endpoint, &join_token, release.as_ref());
 
     let meta = auth::session_meta(&headers);
     audit::record(
@@ -506,6 +502,232 @@ pub async fn delete_one(
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/servers/:id/install
+// POST /api/servers/:id/install/rotate
+// ---------------------------------------------------------------------------
+//
+// `create` only returns the install command once. Operators routinely lose
+// it (closed the modal, switched machines, the agent install failed and the
+// command needs to be re-run). These endpoints let an admin re-derive it
+// without dropping the server row and starting over.
+
+#[derive(Serialize)]
+pub struct InstallInfo {
+    pub id: i64,
+    pub agent_id: String,
+    pub display_name: String,
+    pub join_token: String,
+    pub install_command: String,
+    /// True after the agent has connected at least once. Surfaced so the UI
+    /// can decide whether "rotate" should warn the operator that any
+    /// currently-connected agent will be disconnected.
+    pub registered: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct InstallRow {
+    id: i64,
+    agent_id: uuid::Uuid,
+    display_name: String,
+    join_token: Option<String>,
+    server_token: Option<String>,
+}
+
+pub async fn install_info(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<i64>,
+) -> Result<Json<InstallInfo>, axum::response::Response> {
+    let row: Option<InstallRow> = sqlx::query_as(
+        "SELECT id, agent_id, display_name, join_token, server_token \
+           FROM servers WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|err| {
+        tracing::error!(%err, "servers: install_info");
+        internal_error()
+    })?;
+    let row = row.ok_or_else(not_found)?;
+
+    let Some(join_token) = row.join_token else {
+        // server_token is set → already registered. Force the operator to
+        // explicitly rotate (which kicks the running agent) instead of
+        // silently re-issuing a fresh token.
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                code: "already_registered",
+                message: "server has already registered; rotate to re-issue \
+                          a join token (the current agent will disconnect)"
+                    .into(),
+            }),
+        )
+            .into_response());
+    };
+
+    let (endpoint, public_url) = install_urls(&state.pool).await.map_err(|e| match e {
+        InstallUrlError::EndpointMissing => bad(
+            "agent_endpoint_not_configured",
+            "agent_endpoint must be set in settings",
+        ),
+        InstallUrlError::Db => internal_error(),
+    })?;
+    let release = agent_release_info(&state.pool).await;
+
+    let install_command =
+        format_install_command(&public_url, &endpoint, &join_token, release.as_ref());
+
+    Ok(Json(InstallInfo {
+        id: row.id,
+        agent_id: row.agent_id.to_string(),
+        display_name: row.display_name,
+        join_token,
+        install_command,
+        registered: row.server_token.is_some(),
+    }))
+}
+
+pub async fn rotate_install(
+    State(state): State<AppState>,
+    AdminUser(session): AdminUser,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Json<InstallInfo>, axum::response::Response> {
+    let (endpoint, public_url) = install_urls(&state.pool).await.map_err(|e| match e {
+        InstallUrlError::EndpointMissing => bad(
+            "agent_endpoint_not_configured",
+            "agent_endpoint must be set in settings",
+        ),
+        InstallUrlError::Db => internal_error(),
+    })?;
+    let release = agent_release_info(&state.pool).await;
+
+    let join_token = monitor_common::token::generate();
+    // Clearing server_token alongside writing a new join_token is what makes
+    // the registration RPC accept the next agent — see grpc/agent_service.rs
+    // (`WHERE join_token = $1 AND server_token IS NULL`). Any agent currently
+    // authenticating with the old server_token will be evicted on its next
+    // request.
+    let row: Option<(i64, uuid::Uuid, String)> = sqlx::query_as(
+        "UPDATE servers \
+            SET join_token = $1, \
+                server_token = NULL \
+          WHERE id = $2 \
+       RETURNING id, agent_id, display_name",
+    )
+    .bind(&join_token)
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|err| {
+        tracing::error!(%err, "servers: rotate_install");
+        internal_error()
+    })?;
+    let (id, agent_id, display_name) = row.ok_or_else(not_found)?;
+
+    let install_command =
+        format_install_command(&public_url, &endpoint, &join_token, release.as_ref());
+
+    let meta = auth::session_meta(&headers);
+    audit::record(
+        &state.pool,
+        Some(session.user_id),
+        "server.token_rotated",
+        Some(&display_name),
+        &meta,
+    )
+    .await;
+
+    Ok(Json(InstallInfo {
+        id,
+        agent_id: agent_id.to_string(),
+        display_name,
+        join_token,
+        install_command,
+        registered: false,
+    }))
+}
+
+enum InstallUrlError {
+    EndpointMissing,
+    Db,
+}
+
+async fn install_urls(pool: &sqlx::PgPool) -> Result<(String, String), InstallUrlError> {
+    let endpoint = match settings::agent_endpoint(pool).await {
+        Ok(Some(ep)) => ep,
+        Ok(None) => return Err(InstallUrlError::EndpointMissing),
+        Err(err) => {
+            tracing::error!(%err, "reading agent_endpoint");
+            return Err(InstallUrlError::Db);
+        }
+    };
+    // Public HTTP base for fetching install-agent.sh. Distinct from the gRPC
+    // dial URL above — they're often different ports (8080 vs 9090) or even
+    // different hosts (Caddy in front + bare gRPC behind). Falls back to the
+    // gRPC endpoint only when the operator hasn't filled this in yet, so an
+    // unconfigured panel still produces a syntactically-valid command.
+    let public_url = match settings::panel_public_url(pool).await {
+        Ok(Some(url)) => url,
+        Ok(None) => endpoint.trim_end_matches('/').to_owned(),
+        Err(err) => {
+            tracing::error!(%err, "reading panel_public_url");
+            return Err(InstallUrlError::Db);
+        }
+    };
+    Ok((endpoint, public_url))
+}
+
+fn format_install_command(
+    public_url: &str,
+    endpoint: &str,
+    join_token: &str,
+    release: Option<&(String, String)>,
+) -> String {
+    // Pipe to `bash`, not `sh`. The script uses `set -o pipefail`, `[[ ]]`,
+    // arrays, and other bashisms — Debian/Ubuntu's /bin/sh is dash and
+    // would die on the very first line.
+    let mut cmd = format!(
+        "curl -fsSL {public_url}/install-agent.sh | sudo bash -s -- \
+            --endpoint={endpoint} --token={join_token}"
+    );
+    // Bake in the release coordinates so the installer can fetch the agent
+    // tarball without the operator having to know about `--release-url`.
+    // We only emit these when both pieces are known — without them the
+    // install script falls back to its existing "no release URL configured"
+    // error, which is the right hint to look at the panel's update
+    // settings rather than guessing.
+    if let Some((base, version)) = release {
+        cmd.push_str(&format!(" --release-url={base} --version={version}"));
+    }
+    cmd
+}
+
+/// Resolve the (release_url_base, version) pair the install script needs to
+/// download agent tarballs. Returns `None` when either piece is missing —
+/// either the operator hasn't pointed `update_repo` at a GitHub repo, or the
+/// release poller hasn't cached a release yet (cold panel before the first
+/// poll). Both are fine; the script will refuse to download and tell the
+/// operator to pass `--local-binary` or `--release-url` manually.
+async fn agent_release_info(pool: &sqlx::PgPool) -> Option<(String, String)> {
+    let repo: Option<String> = settings::get(pool, "update_repo").await.ok().flatten();
+    let release: Option<crate::updates::poller::LatestRelease> =
+        settings::get(pool, "latest_release").await.ok().flatten();
+    let repo = repo?;
+    let release = release?;
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return None;
+    }
+    Some((
+        format!("https://github.com/{repo}/releases/download"),
+        release.tag,
+    ))
 }
 
 fn bad(code: &'static str, message: &'static str) -> axum::response::Response {

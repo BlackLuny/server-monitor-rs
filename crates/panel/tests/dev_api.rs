@@ -218,6 +218,11 @@ async fn create_succeeds_and_returns_install_command() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("UPDATE settings SET value = $1 WHERE key = 'panel_public_url'")
+        .bind(Value::String("https://panel.example.com".into()))
+        .execute(&pool)
+        .await
+        .unwrap();
     let addr = start(pool.clone()).await;
     let cookie = login(addr, "root", "correct horse battery staple").await;
 
@@ -236,8 +241,22 @@ async fn create_succeeds_and_returns_install_command() {
     let install = r.body["install_command"].as_str().unwrap();
     assert!(uuid::Uuid::parse_str(agent_id).is_ok());
     assert_eq!(join_token.len(), 43);
-    assert!(install.contains("https://panel.example.com/grpc"));
+    // curl URL should come from panel_public_url, not the gRPC endpoint —
+    // the two lanes are distinct ports (HTTP vs gRPC) and using the gRPC
+    // URL for an HTTP fetch is exactly the regression we're guarding.
+    assert!(install.contains("curl -fsSL https://panel.example.com/install-agent.sh"));
+    // Pipe to bash, not sh — Debian's /bin/sh is dash and chokes on
+    // `set -o pipefail` from the very first line of the install script.
+    assert!(install.contains("| sudo bash -s --"));
+    assert!(install.contains("--endpoint=https://panel.example.com/grpc"));
     assert!(install.contains(join_token));
+    // No release info seeded → command must not contain --release-url; the
+    // install script then refuses to download and prints its existing
+    // "no release URL configured" error, which is the correct hint.
+    assert!(
+        !install.contains("--release-url"),
+        "unexpected --release-url without latest_release seeded: {install}"
+    );
 
     let (display, stored_token, server_token): (String, Option<String>, Option<String>) =
         sqlx::query_as(

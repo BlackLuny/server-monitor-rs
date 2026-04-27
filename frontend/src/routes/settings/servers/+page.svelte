@@ -10,11 +10,15 @@
   import {
     adminCreateServer,
     deleteServer,
+    getServerInstall,
     listGroups,
     listServers,
+    rotateServerInstall,
     updateServer,
+    ApiError,
     type CreatedServer,
     type GroupRow,
+    type InstallInfo,
     type ServerRow
   } from '$lib/api';
   import { ageFromIso } from '$lib/format';
@@ -30,6 +34,20 @@
   let creating = $state(false);
   let createError = $state<string | null>(null);
   let lastCreated = $state<CreatedServer | null>(null);
+
+  // Install-command viewer. Decoupled from the add-server modal so an admin
+  // can re-fetch the script for an existing host without first dismissing
+  // an unrelated dialog. `installInfo` doubles as the visible flag.
+  let installInfo = $state<InstallInfo | null>(null);
+  let installLoading = $state(false);
+  let installError = $state<string | null>(null);
+  /** When true, the server already registered — the only way back to a
+   *  fresh install command is to rotate the token, which evicts the
+   *  currently-connected agent. UI surfaces this distinctly. */
+  let installAlreadyRegistered = $state(false);
+  let installServerId = $state<number | null>(null);
+  let installServerName = $state<string>('');
+  let rotating = $state(false);
 
   // Edit modal state — one server at a time.
   let editing = $state<ServerRow | null>(null);
@@ -84,6 +102,55 @@
       createError = err instanceof Error ? err.message : String(err);
     } finally {
       creating = false;
+    }
+  }
+
+  async function openInstall(id: number, name: string) {
+    installServerId = id;
+    installServerName = name;
+    installInfo = null;
+    installError = null;
+    installAlreadyRegistered = false;
+    installLoading = true;
+    try {
+      installInfo = await getServerInstall(id);
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'already_registered') {
+        installAlreadyRegistered = true;
+      } else {
+        installError = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      installLoading = false;
+    }
+  }
+
+  function closeInstall() {
+    installServerId = null;
+    installServerName = '';
+    installInfo = null;
+    installError = null;
+    installAlreadyRegistered = false;
+  }
+
+  async function rotateInstall() {
+    if (installServerId == null) return;
+    if (
+      !confirm(
+        'Rotating the join token will disconnect the currently registered agent. The host will need to be re-installed with the new command. Continue?'
+      )
+    )
+      return;
+    rotating = true;
+    installError = null;
+    try {
+      installInfo = await rotateServerInstall(installServerId);
+      installAlreadyRegistered = false;
+      await reload();
+    } catch (err) {
+      installError = err instanceof Error ? err.message : String(err);
+    } finally {
+      rotating = false;
     }
   }
 
@@ -271,6 +338,11 @@
             <td class="px-3 py-2 text-right">
               <button
                 type="button"
+                onclick={() => openInstall(s.id, s.display_name)}
+                class="mr-3 text-fg-tertiary hover:text-fg"
+              >install</button>
+              <button
+                type="button"
                 onclick={() => openEdit(s)}
                 class="mr-3 text-fg-tertiary hover:text-fg"
               >edit</button>
@@ -365,6 +437,93 @@
         >
           {creating ? 'creating…' : 'create'}
         </button>
+      </div>
+    {/if}
+  </div>
+{/if}
+
+{#if installServerId != null}
+  <button
+    type="button"
+    onclick={closeInstall}
+    class="fixed inset-0 z-40 cursor-default bg-black/60"
+    aria-label="close"
+  ></button>
+  <div
+    role="dialog"
+    aria-modal="true"
+    aria-label="Install command"
+    class="fixed left-1/2 top-1/2 z-50 w-[520px] -translate-x-1/2 -translate-y-1/2 rounded border border-border bg-elev-1 p-6"
+  >
+    <div class="mb-1 font-mono text-2xs uppercase tracking-[0.16em] text-fg-tertiary">
+      install command
+    </div>
+    <h2 class="mb-4 text-md font-medium text-fg">{installServerName}</h2>
+
+    {#if installLoading}
+      <div class="py-6 text-center font-mono text-xs text-fg-tertiary">loading…</div>
+    {:else if installAlreadyRegistered}
+      <p class="mb-4 text-sm text-fg-secondary">
+        This host has already registered. To re-issue an install command,
+        rotate the join token — the currently-connected agent will be
+        disconnected and the host must be re-installed.
+      </p>
+      {#if installError}
+        <div
+          class="mb-3 rounded border border-border bg-recess px-3 py-2 font-mono text-xs"
+          style="color: var(--status-error)"
+        >
+          {installError}
+        </div>
+      {/if}
+      <div class="flex justify-end gap-2">
+        <button
+          type="button"
+          onclick={closeInstall}
+          class="rounded border border-border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-fg-secondary hover:bg-elev-2"
+        >cancel</button>
+        <button
+          type="button"
+          disabled={rotating}
+          onclick={rotateInstall}
+          class="rounded border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.14em] disabled:opacity-40"
+          style:border-color="var(--status-error)"
+          style:color="var(--status-error)"
+        >
+          {rotating ? 'rotating…' : 'rotate token'}
+        </button>
+      </div>
+    {:else if installInfo}
+      <pre
+        class="mb-4 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded border border-border bg-recess p-3 font-mono text-xs text-fg"
+      >{installInfo.install_command}</pre>
+      <div class="flex justify-end gap-2">
+        <button
+          type="button"
+          onclick={() => navigator.clipboard.writeText(installInfo!.install_command)}
+          class="rounded border border-border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-fg-secondary hover:bg-elev-2"
+        >copy</button>
+        <button
+          type="button"
+          onclick={closeInstall}
+          class="rounded border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.14em]"
+          style:border-color="var(--border-accent)"
+          style:color="var(--border-accent)"
+        >done</button>
+      </div>
+    {:else if installError}
+      <div
+        class="mb-4 rounded border border-border bg-recess px-3 py-2 font-mono text-xs"
+        style="color: var(--status-error)"
+      >
+        {installError}
+      </div>
+      <div class="flex justify-end">
+        <button
+          type="button"
+          onclick={closeInstall}
+          class="rounded border border-border px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.12em] text-fg-secondary hover:bg-elev-2"
+        >close</button>
       </div>
     {/if}
   </div>

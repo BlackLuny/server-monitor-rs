@@ -104,7 +104,7 @@ launchd service.
 
 ```sh
 # One-liner via curl (only works once a release is published — see TODO):
-curl -fsSL https://example.com/install-agent.sh | sudo sh -s -- \
+curl -fsSL https://example.com/install-agent.sh | sudo bash -s -- \
     --endpoint=https://panel.example.com/grpc \
     --token=<join-token-from-panel>
 

@@ -7,6 +7,7 @@
 mod agents;
 mod auth;
 mod groups;
+mod installer;
 pub mod metrics;
 mod probes;
 mod servers;
@@ -46,6 +47,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/version", get(version))
+        // ---- agent installer (unauthenticated; join token is the auth) ----
+        .route("/install-agent.sh", get(installer::install_agent_sh))
+        .route("/install-agent.ps1", get(installer::install_agent_ps1))
         // ---- first-run wizard ----
         .route("/api/setup/status", get(setup::status))
         .route("/api/setup", post(setup::create))
@@ -66,6 +70,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/servers/sparklines", get(metrics::server_sparklines))
         .route("/api/servers/:id/metrics", get(metrics::server_metrics))
+        .route("/api/servers/:id/install", get(servers::install_info))
+        .route(
+            "/api/servers/:id/install/rotate",
+            post(servers::rotate_install),
+        )
         // ---- groups ----
         .route("/api/groups", get(groups::list).post(groups::create))
         .route(
