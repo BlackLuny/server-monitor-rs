@@ -10,6 +10,27 @@ supervisor moving in lockstep.
 Nothing yet — track in-flight work in
 [the milestone roadmap](../README.md#roadmap) until the next tag.
 
+## [0.2.4] — 2026-04-27
+
+Bug-fix release. Schema unchanged.
+
+### Self-update was a silent no-op
+`agent-supervisor::current_agent_binary` checked `--agent-binary`
+(install-time override) before `state.current`, so every successful
+swap quietly ran the install-time binary instead of the new versioned
+one. Symptoms in the wild: the supervisor logs `applying staged swap …
+binary=…/v0.2.2/monitor-agent`, the spawned agent logs
+`monitor-agent starting version="0.2.0"`, and the rollout sits in
+`sent` forever — the panel never sees a new `agent_version`.
+
+`install-agent.sh` always passes `--agent-binary` (it's the
+boot-strap pointer at `/opt/monitor-agent/bin/monitor-agent`), so
+every host installed via the published one-liner was affected.
+
+Flip the priority: `state.current` wins, the override is a recovery
+path. Three unit tests pin the new behaviour, including the missing-
+versioned-binary fallback.
+
 ## [0.2.3] — 2026-04-27
 
 Bug-fix release. Schema unchanged.

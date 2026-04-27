@@ -140,11 +140,30 @@ fn agent_bin_name() -> &'static str {
 }
 
 fn current_agent_binary(root: &Path, state: &State, override_path: Option<&Path>) -> PathBuf {
+    // Prefer the versioned binary `apply_swap` pinned. Falling back to the
+    // override only when there's no current version (fresh install, or a
+    // rollback wiped state.current).
+    //
+    // The previous order made every self-update a no-op: install-agent.sh
+    // passes `--agent-binary /opt/monitor-agent/bin/monitor-agent`, so the
+    // override was always set, so even after a successful download +
+    // extract the supervisor kept running the install-time binary.
+    if let Some(ref v) = state.current {
+        let versioned = root.join("versions").join(v).join(agent_bin_name());
+        if versioned.exists() {
+            return versioned;
+        }
+        // Versioned dir was pruned or never landed — fall through to the
+        // override / bin path as a recovery so we don't deadlock the
+        // supervisor on a missing binary.
+        tracing::warn!(
+            version = %v,
+            path = %root.join("versions").join(v).join(agent_bin_name()).display(),
+            "state.current points at a binary that doesn't exist; falling back",
+        );
+    }
     if let Some(p) = override_path {
         return p.to_path_buf();
-    }
-    if let Some(ref v) = state.current {
-        return root.join("versions").join(v).join(agent_bin_name());
     }
     // Fallback: `<root>/bin/<agent>` (matches install-agent.sh layout).
     root.join("bin").join(agent_bin_name())
@@ -625,4 +644,55 @@ unsafe fn libc_kill(pid: i32, sig: i32) {
         fn kill(pid: i32, sig: i32) -> i32;
     }
     kill(pid, sig);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{current_agent_binary, State};
+    use std::path::Path;
+
+    #[test]
+    fn current_binary_prefers_versioned_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let versioned = root.join("versions").join("v0.2.2");
+        std::fs::create_dir_all(&versioned).unwrap();
+        let bin = versioned.join(super::agent_bin_name());
+        std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        let state = State {
+            current: Some("v0.2.2".into()),
+            ..Default::default()
+        };
+        let override_path = Path::new("/opt/monitor-agent/bin/monitor-agent");
+        let chosen = current_agent_binary(root, &state, Some(override_path));
+        assert_eq!(
+            chosen, bin,
+            "state.current must beat the install-time override; otherwise self-update is a no-op"
+        );
+    }
+
+    #[test]
+    fn current_binary_falls_back_to_override_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = State::default();
+        let override_path = Path::new("/opt/monitor-agent/bin/monitor-agent");
+        let chosen = current_agent_binary(tmp.path(), &state, Some(override_path));
+        assert_eq!(chosen, override_path);
+    }
+
+    #[test]
+    fn current_binary_falls_back_to_override_if_versioned_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = State {
+            current: Some("v9.9.9".into()),
+            ..Default::default()
+        };
+        let override_path = Path::new("/opt/monitor-agent/bin/monitor-agent");
+        let chosen = current_agent_binary(tmp.path(), &state, Some(override_path));
+        assert_eq!(
+            chosen, override_path,
+            "missing versioned binary must not deadlock the supervisor"
+        );
+    }
 }
