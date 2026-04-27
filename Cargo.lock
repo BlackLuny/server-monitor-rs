@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-agent"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-agent-supervisor"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1662,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-common"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "argon2",
  "base64",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-panel"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-proto"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "prost",
  "prost-types",
@@ -4309,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",

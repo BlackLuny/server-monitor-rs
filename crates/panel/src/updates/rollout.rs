@@ -149,6 +149,13 @@ pub struct AgentFilter {
 /// Compose a Rust target triple from the hardware columns we record on
 /// register. Returns `None` when we don't recognise the OS/arch combo —
 /// those agents get skipped.
+///
+/// `hw_os` is whatever `sysinfo::System::name()` returned — that's a
+/// distribution string ("Debian GNU/Linux", "Ubuntu", "Arch Linux") on
+/// Linux, "Darwin" on macOS, "Windows 11" on Windows. We can't match it
+/// verbatim against a fixed set or every distro the agent has ever
+/// reported gets dropped from the eligible set. Match by substring on
+/// the kernel / family name; those don't collide with each other.
 #[must_use]
 pub fn agent_target_triple(os: &str, arch: &str) -> Option<&'static str> {
     let arch = arch.trim().to_ascii_lowercase();
@@ -158,27 +165,62 @@ pub fn agent_target_triple(os: &str, arch: &str) -> Option<&'static str> {
         "aarch64" | "arm64" => "aarch64",
         _ => return None,
     };
-    match os.as_str() {
+    if is_linux_os(&os) {
         // Linux distributions all share the musl artefact today.
-        "linux" => Some(if arch == "aarch64" {
+        Some(if arch == "aarch64" {
             "aarch64-unknown-linux-musl"
         } else {
             "x86_64-unknown-linux-musl"
-        }),
-        "macos" | "darwin" => Some(if arch == "aarch64" {
+        })
+    } else if os.contains("darwin") || os.contains("macos") {
+        Some(if arch == "aarch64" {
             "aarch64-apple-darwin"
         } else {
             "x86_64-apple-darwin"
-        }),
-        "windows" => {
-            if arch == "x86_64" {
-                Some("x86_64-pc-windows-msvc")
-            } else {
-                None // no Windows ARM build today
-            }
+        })
+    } else if os.contains("windows") {
+        if arch == "x86_64" {
+            Some("x86_64-pc-windows-msvc")
+        } else {
+            None // no Windows ARM build today
         }
-        _ => None,
+    } else {
+        None
     }
+}
+
+/// Best-effort recognition of Linux distros from whatever
+/// `sysinfo::System::name()` happened to return. The substring "linux"
+/// catches "Debian GNU/Linux", "Arch Linux", and any future distro that
+/// keeps it in the brand. The keyword list catches the major ones that
+/// drop it (Ubuntu, Fedora, …). False positives would need a non-Linux
+/// OS literally calling itself one of these names — vanishingly small.
+fn is_linux_os(os_lc: &str) -> bool {
+    if os_lc.contains("linux") {
+        return true;
+    }
+    const LINUX_DISTROS: &[&str] = &[
+        "ubuntu",
+        "debian",
+        "fedora",
+        "centos",
+        "rhel",
+        "red hat",
+        "rocky",
+        "alma",
+        "alpine",
+        "arch",
+        "manjaro",
+        "opensuse",
+        "suse",
+        "gentoo",
+        "pop!_os",
+        "pop_os",
+        "nixos",
+        "mint",
+        "elementary",
+    ];
+    LINUX_DISTROS.iter().any(|d| os_lc.contains(d))
 }
 
 /// Locate the cached metadata for a target version.
@@ -589,6 +631,26 @@ mod tests {
         );
         assert!(agent_target_triple("windows", "aarch64").is_none()); // no win arm
         assert!(agent_target_triple("freebsd", "x86_64").is_none());
+
+        // The strings sysinfo actually returns aren't bare family names.
+        // These are real values seen in production; pin them so a strict
+        // `os == "linux"` regression on the matching code is loud.
+        assert_eq!(
+            agent_target_triple("Debian GNU/Linux", "x86_64").unwrap(),
+            "x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            agent_target_triple("Ubuntu", "x86_64").unwrap(),
+            "x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            agent_target_triple("Arch Linux", "aarch64").unwrap(),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            agent_target_triple("Windows 11", "x86_64").unwrap(),
+            "x86_64-pc-windows-msvc"
+        );
     }
 
     #[test]

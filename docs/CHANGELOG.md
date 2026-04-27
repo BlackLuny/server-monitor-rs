@@ -10,6 +10,23 @@ supervisor moving in lockstep.
 Nothing yet — track in-flight work in
 [the milestone roadmap](../README.md#roadmap) until the next tag.
 
+## [0.2.3] — 2026-04-27
+
+Bug-fix release. Schema unchanged.
+
+### Rollout target matching for real distro names
+`agent_target_triple` matched `hw_os` against literal `"linux"` /
+`"macos"` / `"windows"`, but `sysinfo::System::name()` returns the
+distribution string ("Debian GNU/Linux", "Ubuntu", "Arch Linux", "Darwin",
+"Windows 11"). Every Linux box that wasn't called literally `"linux"`
+got dropped from the eligible set with `no eligible agents matched
+this rollout` — even though the agent was online and registered.
+
+Match by substring (`contains("linux")`) plus a list of major distro
+names that drop the kernel keyword from the brand (Ubuntu, Fedora,
+CentOS, Rocky, Alma, Alpine, Arch, Manjaro, openSUSE, …). Same for
+`darwin` / `macos` and `windows`.
+
 ## [0.2.2] — 2026-04-27
 
 Hardware snapshot refresh on every stream connect. Schema and protocol
