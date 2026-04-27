@@ -70,7 +70,22 @@ message AgentToPanel {
         // `PanelToAgent.recording_fetch`. The agent splits the file into
         // sequential 64 KiB chunks and ends the stream with `eof = true`.
         RecordingFetchChunk recording_chunk = 18;
+        // First frame the agent sends after a successful stream connect.
+        // Refreshes the panel's cached hardware snapshot + agent version
+        // without requiring a full Register handshake. Without this, hw_*
+        // fields are frozen at the value reported during first install —
+        // adding a disk, upgrading the OS, or resizing a VM never reflects
+        // in the panel.
+        Hello hello = 19;
     }
+}
+
+// Sent once per stream connect, before any metrics flow. Schema-stable so
+// older panels that don't recognise the variant simply ignore it (the
+// stream continues to function for everything else).
+message Hello {
+    HardwareInfo hardware = 1;
+    string agent_version = 2;
 }
 
 message MetricBatch {

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use monitor_proto::{
     v1::{
         agent_service_client::AgentServiceClient, agent_to_panel::Payload as UpPayload,
-        panel_to_agent::Payload as DownPayload, AgentToPanel, Heartbeat, MetricBatch,
+        panel_to_agent::Payload as DownPayload, AgentToPanel, Heartbeat, Hello, MetricBatch,
         MetricSnapshot, ProbeBatch, ProbeResult,
     },
     AGENT_VERSION_METADATA, SERVER_TOKEN_METADATA,
@@ -151,11 +151,17 @@ async fn run_once(
     flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let _ = flush_ticker.tick().await;
 
-    // First heartbeat immediately so the panel's `last_seen_at` is fresh even
-    // before the first metric flush (which waits 5s).
-    send_heartbeat(&up_tx, process_start, 1).await?;
+    // Hello goes first — fresh hardware snapshot + agent version so the
+    // panel can refresh its cache without a full re-Register. Without this
+    // hw_* fields are frozen at first install: a disk added later, a VM
+    // resized, an OS upgraded would never reflect in the dashboard.
+    send_hello(&up_tx, 1).await?;
 
-    let mut seq: u64 = 2;
+    // First heartbeat immediately after so the panel's `last_seen_at` is
+    // fresh even before the first metric flush (which waits 5s).
+    send_heartbeat(&up_tx, process_start, 2).await?;
+
+    let mut seq: u64 = 3;
 
     loop {
         tokio::select! {
@@ -326,6 +332,20 @@ async fn flush_metrics(
     *seq += 1;
     up_tx
         .send(msg)
+        .await
+        .map_err(|_| tonic::Status::aborted("upstream channel closed"))
+}
+
+async fn send_hello(tx: &mpsc::Sender<AgentToPanel>, seq: u64) -> Result<(), tonic::Status> {
+    let hw = crate::hardware::collect();
+    let msg = AgentToPanel {
+        seq,
+        payload: Some(UpPayload::Hello(Hello {
+            hardware: Some(hw),
+            agent_version: monitor_common::VERSION.to_string(),
+        })),
+    };
+    tx.send(msg)
         .await
         .map_err(|_| tonic::Status::aborted("upstream channel closed"))
 }

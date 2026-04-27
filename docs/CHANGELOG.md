@@ -10,6 +10,33 @@ supervisor moving in lockstep.
 Nothing yet — track in-flight work in
 [the milestone roadmap](../README.md#roadmap) until the next tag.
 
+## [0.2.2] — 2026-04-27
+
+Hardware snapshot refresh on every stream connect. Schema and protocol
+unchanged for older agents — they keep working without modification.
+
+### Stale `hw_*` fields after install
+Until now, every `servers.hw_*` column (`hw_cpu_model`, `hw_cpu_cores`,
+`hw_mem_bytes`, `hw_swap_bytes`, `hw_disk_bytes`, `hw_os`, `hw_os_version`,
+`hw_kernel`, `hw_arch`, `hw_virtualization`) was written exactly once,
+during Register. Adding a disk, resizing a VM, or upgrading the OS never
+reflected in the dashboard — `agent_version` was the only field with
+stream-connect refresh logic.
+
+- `AgentToPanel` gains a `Hello` oneof variant carrying `HardwareInfo` +
+  `agent_version`. The agent sends it as the first frame after every
+  successful stream open, before heartbeats / metrics.
+- The panel handles `Hello` in `agent_service::handle_payload` and runs a
+  COALESCE-guarded UPDATE on every `hw_*` column plus `agent_version`,
+  so a partially-populated Hello (kernel can't read swap, say) leaves
+  unaffected fields untouched.
+- The legacy `x-agent-version` metadata refresh stays in place for
+  backwards compatibility with v0.2.0 / v0.2.1 agents that don't yet
+  send Hello.
+- `crates/panel/tests/stream_rpc.rs` covers the case operators were hit
+  by: a row with a stale `hw_disk_bytes`, a Hello with a different
+  value, an assertion that the row was rewritten.
+
 ## [0.2.1] — 2026-04-27
 
 Bug-fix release. Schema unchanged from `v0.2.0` apart from the new

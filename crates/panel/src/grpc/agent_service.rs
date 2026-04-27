@@ -307,6 +307,72 @@ async fn handle_payload(
         AgentPayload::RecordingChunk(chunk) => {
             state.recording_hub.deliver_chunk(chunk);
         }
+        AgentPayload::Hello(hello) => {
+            ingest_hello(state, session, hello).await;
+        }
+    }
+}
+
+/// Refresh `servers.hw_*` + `agent_version` from the agent's Hello frame.
+///
+/// Hardware drift (disk added, VM resized, OS upgraded) used to be invisible
+/// because hw_* is only written on Register, and Register only runs on first
+/// install. This handler runs on every stream connect, so a reconnect after
+/// any hardware change picks the new values up automatically.
+///
+/// `NULLIF` on each binding lets a partially-populated Hello (the agent
+/// can't read swap on a kernel that doesn't expose it, say) leave the
+/// existing column untouched instead of zeroing it.
+async fn ingest_hello(
+    state: &AppState,
+    session: &crate::grpc::AgentSession,
+    hello: monitor_proto::v1::Hello,
+) {
+    let hw = hello.hardware.unwrap_or_default();
+    if let Err(err) = sqlx::query(
+        r#"UPDATE servers SET
+              hw_cpu_model      = COALESCE(NULLIF($1, ''), hw_cpu_model),
+              hw_cpu_cores      = COALESCE(NULLIF($2, 0), hw_cpu_cores),
+              hw_mem_bytes      = COALESCE(NULLIF($3::bigint, 0::bigint), hw_mem_bytes),
+              hw_swap_bytes     = COALESCE(NULLIF($4::bigint, 0::bigint), hw_swap_bytes),
+              hw_disk_bytes     = COALESCE(NULLIF($5::bigint, 0::bigint), hw_disk_bytes),
+              hw_os             = COALESCE(NULLIF($6, ''), hw_os),
+              hw_os_version     = COALESCE(NULLIF($7, ''), hw_os_version),
+              hw_kernel         = COALESCE(NULLIF($8, ''), hw_kernel),
+              hw_arch           = COALESCE(NULLIF($9, ''), hw_arch),
+              hw_virtualization = COALESCE(NULLIF($10, ''), hw_virtualization),
+              hw_boot_id        = COALESCE(NULLIF($11, ''), hw_boot_id),
+              agent_version     = COALESCE(NULLIF($12, ''), agent_version)
+            WHERE id = $13"#,
+    )
+    .bind(&hw.cpu_model)
+    .bind(i32::try_from(hw.cpu_cores).unwrap_or(0))
+    .bind(i64::try_from(hw.mem_bytes).unwrap_or(0))
+    .bind(i64::try_from(hw.swap_bytes).unwrap_or(0))
+    .bind(i64::try_from(hw.disk_bytes).unwrap_or(0))
+    .bind(&hw.os)
+    .bind(&hw.os_version)
+    .bind(&hw.kernel)
+    .bind(&hw.arch)
+    .bind(&hw.virtualization)
+    .bind(&hw.boot_id)
+    .bind(&hello.agent_version)
+    .bind(session.server_row_id)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(agent_id = %session.agent_id, %err, "hello refresh failed");
+        return;
+    }
+
+    // Same correlation pass Register does — a Hello carrying a fresh
+    // agent_version after a self-update flips the matching assignment row.
+    if !hello.agent_version.is_empty() {
+        if let Err(err) =
+            mark_assignments_for_version(&state.pool, session.agent_id, &hello.agent_version).await
+        {
+            tracing::warn!(%err, "hello assignment correlation failed");
+        }
     }
 }
 

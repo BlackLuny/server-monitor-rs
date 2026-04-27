@@ -13,7 +13,7 @@ use monitor_panel::{
 use monitor_proto::{
     v1::{
         agent_service_client::AgentServiceClient, agent_service_server::AgentServiceServer,
-        agent_to_panel::Payload as UpPayload, AgentToPanel, Heartbeat,
+        agent_to_panel::Payload as UpPayload, AgentToPanel, HardwareInfo, Heartbeat, Hello,
     },
     SERVER_TOKEN_METADATA,
 };
@@ -191,4 +191,87 @@ async fn heartbeat_updates_last_seen_and_hub() {
         }
     }
     panic!("session was not removed from hub after agent disconnect");
+}
+
+#[tokio::test]
+async fn hello_refreshes_hardware_snapshot() {
+    let Some(db) = db_url() else { return };
+    let pool = fresh_pool(&db).await;
+    let (agent_id, token) = seed_registered(&pool, "gamma").await;
+
+    // Seed a stale hardware snapshot — this is the state operators end up
+    // in today: hw_disk_bytes was right at install time, then they added a
+    // disk and the dashboard is now permanently wrong.
+    sqlx::query(
+        r#"UPDATE servers SET
+              hw_cpu_model  = 'old cpu',
+              hw_cpu_cores  = 1,
+              hw_mem_bytes  = 1024,
+              hw_disk_bytes = 21474836480,
+              hw_os         = 'linux',
+              agent_version = '0.2.0'
+            WHERE agent_id = $1"#,
+    )
+    .bind(agent_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let server = start_server(pool.clone()).await;
+    let mut client = AgentServiceClient::connect(format!("http://{}", server.addr))
+        .await
+        .unwrap();
+    let (tx, rx) = mpsc::channel::<AgentToPanel>(4);
+    let mut req = tonic::Request::new(ReceiverStream::new(rx));
+    req.metadata_mut()
+        .insert(SERVER_TOKEN_METADATA, token.parse().unwrap());
+    let response = client.stream(req).await.unwrap();
+    let _down = response.into_inner();
+
+    tx.send(AgentToPanel {
+        seq: 1,
+        payload: Some(UpPayload::Hello(Hello {
+            hardware: Some(HardwareInfo {
+                cpu_model: "shiny new cpu".into(),
+                cpu_cores: 8,
+                mem_bytes: 16 * 1024 * 1024 * 1024,
+                swap_bytes: 0,
+                disk_bytes: 500 * 1024 * 1024 * 1024,
+                os: "linux".into(),
+                os_version: "13".into(),
+                kernel: "6.10.0".into(),
+                arch: "x86_64".into(),
+                virtualization: "kvm".into(),
+                boot_id: "boot-xyz".into(),
+            }),
+            agent_version: "0.2.2".into(),
+        })),
+    })
+    .await
+    .unwrap();
+
+    // Poll for the row to reflect the Hello values. Same fixed-budget
+    // pattern the heartbeat test uses; the panel processes Hello in an
+    // inbound task so the write isn't synchronous with our send.
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let row: (String, i32, i64, i64, String) = sqlx::query_as(
+            "SELECT hw_cpu_model, hw_cpu_cores, hw_mem_bytes, hw_disk_bytes, agent_version \
+               FROM servers WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if row.0 == "shiny new cpu"
+            && row.1 == 8
+            && row.2 == 16 * 1024 * 1024 * 1024
+            && row.3 == 500 * 1024 * 1024 * 1024
+            && row.4 == "0.2.2"
+        {
+            drop(tx);
+            return;
+        }
+    }
+    panic!("Hello did not refresh hardware snapshot within budget");
 }
